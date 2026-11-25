@@ -1,0 +1,11 @@
+/build/
+/build-*/
+/ESP32_Sleep_PoC/build/
+/.arduinoIDE/
+/.arduino15/
+/.idea/
+/.vscode/
+/.cache/
+/arduino-cli.local.yaml
+/sketch.yaml.local
+/.env
