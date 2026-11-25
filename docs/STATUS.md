@@ -4,7 +4,7 @@ Revision 0.4 requirements baseline. Updated for T02 on 2026-11-25.
 ## Current state
 - The foundation initializes UART0, CPU frequency, shared I2C and GPIOs. The firmware starts DISARMED, reports startup faults and stays awake. T02 initializes the MPU6050 for continuous acceleration and reports identity and register readback at startup. The optional acceleration diagnostic reports signed XYZ and magnitude once per second.
 - Selected architecture: explicit ESP32 light sleep, continuous MPU6050 accelerometer with latched GPIO4 motion interrupt, 1 s tilt checks with 5 s persistence, BME280 four forced samples every 10 s.
-- The owner completed the T01 board check. T01 is merged in `78d6897`, the starting base for T02. The first T02 board boot read the expected MPU identity but failed filter configuration readback. The revised initialization order needs a board retest.
+- The owner completed the T01 board check. T01 is merged in `78d6897`, the starting base for T02. The owner reported a passing T02 board retest with appropriate acceleration magnitude readings after the initialization-order change.
 - Hardware wiring change required relative to original: move MPU INT GPIO17 -> GPIO4. Owner approved; physical connection not confirmed.
 
 ## Environment
@@ -44,7 +44,7 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 | ID | State | Build | Hardware | Notes |
 |---|---|---|---|---|
 | T01 | MERGED | normal and uptime diagnostic passed | owner board check passed | Merge `78d6897` |
-| T02 | IMPLEMENTED_PENDING_VERIFICATION | updated normal and both diagnostics passed | filter readback failed on first boot, retest pending | Retest startup, then check sign/scale and missing module if feasible |
+| T02 | VERIFIED | updated normal and both diagnostics passed | owner retest passed | Ready for owner merge. Optional missing-module check unreported. |
 | T03 | NOT_STARTED | pending | pending | critical motion latch risk |
 | T04 | NOT_STARTED | pending | pending | |
 | T05 | NOT_STARTED | pending | pending | |
@@ -99,7 +99,7 @@ Exact Windows compile commands used from the repository root:
 - Startup uses 100 ms guards before the identity probe and after reset, plus a 30 ms acceleration settling guard after wake. I2C uses the foundation's 50 ms Wire timeout. The optional one-second diagnostic rejects failed samples, reports consecutive failures and stops after the configured limit of three until reset. Initialization failure emits `MPU_INIT_ERROR` and stays disarmed. [InvenSense register map RM-MPU-6000A-00 rev. 4.2](https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Register-Map.pdf) [InvenSense product specification PS-MPU-6000A-00 rev. 3.4](https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Datasheet.pdf)
 - The initial sandboxed compile could not access the installed Arduino package directory. The commands below use the installed core with approved access. The two diagnostic sketch copies are ignored and differ from the repository sketch only in the `TEST_MODE` selection. The tracked setting is `TestMode::None`.
 - All three builds passed for `esp32:esp32:esp32`. Normal used 393,652 bytes of flash and 37,356 bytes of global RAM. `MpuAcceleration` used 394,592 bytes of flash and 37,372 bytes of global RAM. `FoundationUptime` used 393,752 bytes of flash and 37,364 bytes of global RAM. Compile-time conversion checks passed for zero, ±1 g, −1 count and both signed endpoints. Firmware string checks confirmed the MPU startup marker in all three binaries and each periodic diagnostic marker only in its selected variant. `git diff --check` passed.
-- Hardware evidence is pending. Use [Build and board checks](#build-and-board-checks) to capture the actual identity and registers, stationary magnitude, rotation and axis signs, and missing-device behavior if feasible. The T02 merge gate remains pending owner verification. T03 depends on the T02 merge.
+- At initial handoff, hardware verification was pending. The startup follow-up below records the first failure and passing retest. T03 depends on the T02 merge.
 
 ```powershell
 $cli = 'D:/ArduinoIDE/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe'
@@ -116,12 +116,14 @@ foreach ($mode in 'accel', 'uptime') {
 ### T02 startup readback follow-up · 2026-11-25
 
 - The owner reported `WHO_AM_I 0x68` and matching readbacks through `0x6C=0x07`. The filter register `0x1A` returned `0x00` with `0x01` expected. Startup reported `MPU_INIT_ERROR` and `DISARMED`. The later registers in the original sequence were not read after the mismatch.
-- The original code wrote the filter and range before clearing the reset-default sleep bit. The revised sequence sets gyro standby, wakes on the internal oscillator, and waits 30 ms before programming the filter and range. This tests whether programming while asleep caused the mismatch. Required values and strict readback are retained. The board retest remains the merge gate.
+- The original code wrote the filter and range before clearing the reset-default sleep bit. The revised sequence sets gyro standby, wakes on the internal oscillator, and waits 30 ms before programming the filter and range. This tests whether programming while asleep caused the mismatch. Required values and strict readback are retained.
 - Re-ran the three compile commands above on Arduino-ESP32 3.3.12. Normal, acceleration diagnostic and uptime diagnostic passed, including the signed conversion assertions. Flash sizes were 393,672, 394,612 and 393,772 bytes respectively. `git diff --check` passed.
+- The owner reported that the board tests passed and that `MpuAcceleration` produced appropriate magnitude readings on the revised firmware (`db9aa59` with the diagnostic mode selected). Periodic readings require successful identity and configuration readback in this firmware. Exact XYZ values, the repeated register dump and the optional disconnected-module result were unreported. Restored `TestMode::None` after testing. T02 is verified and ready for owner merge.
 
 ## Verification evidence index
 Add entries keyed V01..V14 with date, firmware commit/config, procedure, expected, observed evidence, pass/fail/pending/waived. Do not store fabricated serial logs as actual observations. V14 remains deferred.
 
 - **V01 build and T01 board observations, 2026-11-25.** Uncommitted T01 on base `3f15c02`. Normal mode and `FoundationUptime` both compiled for ESP32 Dev Module on Arduino-ESP32 3.3.12. The owner observed serial-reported I2C initialization, 80 MHz actual CPU frequency, a timestamped `DISARMED` line and advancing diagnostic uptime. After deliberate reset, the owner observed uptime restart near zero and advance as expected. The T01 board check passed. Sensor identity and missing-sensor arming checks are deferred to their respective implementation tasks.
 - **V01 T02 build and MPU board check, 2026-11-25.** Uncommitted T02 on base `78d6897`. All three variants compiled for ESP32 Dev Module on Arduino-ESP32 3.3.12. Identity, register readbacks, approximate 1 g stationary magnitude and rotation/sign are pending board evidence. Missing-MPU startup handling is also pending a board check if feasible. The arming gate is covered by later lifecycle work.
-- **V01 T02 first MPU startup, 2026-11-25.** Owner tested the original normal build before the wake-order change. Identity read passed with `0x68`. Configuration readback failed at `0x1A` with actual `0x00` and expected `0x01`. Firmware reported the fault and stayed `DISARMED`. The revised startup, stationary and rotation checks, and missing-module check are pending board evidence.
+- **V01 T02 first MPU startup, 2026-11-25.** Owner tested the original normal build before the wake-order change. Identity read passed with `0x68`. Configuration readback failed at `0x1A` with actual `0x00` and expected `0x01`. Firmware reported the fault and stayed `DISARMED`.
+- **V01 T02 MPU retest, 2026-11-25.** Owner reported passing board tests on the revised firmware with `MpuAcceleration` selected and appropriate magnitude readings. Startup success follows from the diagnostic running. Optional missing-module check unreported.
