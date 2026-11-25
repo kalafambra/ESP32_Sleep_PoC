@@ -16,6 +16,9 @@ constexpr int UART_TX_PIN = 1;
 constexpr int UART_RX_PIN = 3;
 constexpr uint32_t I2C_CLOCK_HZ = 400000;
 constexpr uint16_t I2C_TIMEOUT_MS = 50;
+constexpr uint32_t MPU_REGISTER_READY_WAIT_MS = 100;
+constexpr uint32_t MPU_WAKE_SETTLE_MS = 30;
+constexpr uint32_t MPU_ACCEL_SETTLE_MS = 30;
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t CPU_FREQ_MHZ = 80;
 
@@ -50,9 +53,10 @@ constexpr bool ENABLE_IMPACT_DETECTION = true;
 constexpr bool ENABLE_TILT_DETECTION = true;
 constexpr bool ENABLE_ENV_ACQUISITION = true;
 
-enum class TestMode { None, FoundationUptime };
+enum class TestMode { None, FoundationUptime, MpuAcceleration };
 constexpr TestMode TEST_MODE = TestMode::None;
 constexpr uint32_t FOUNDATION_UPTIME_LOG_MS = 1000;
+constexpr uint32_t MPU_ACCEL_LOG_MS = 1000;
 constexpr uint32_t AWAKE_IDLE_YIELD_MS = 1;
 
 constexpr bool validOversampling(uint8_t multiplier) {
@@ -82,5 +86,8 @@ static_assert(ZEROING_TIME_MS > 0 && ZEROING_TIME_MS <= ARMING_DELAY_MS && ZEROI
               "Zeroing samples must fit in the arming delay");
 static_assert(SENSOR_FAILURE_LIMIT > 0, "Sensor failure limit must be positive");
 static_assert(FOUNDATION_UPTIME_LOG_MS > 0 && AWAKE_IDLE_YIELD_MS > 0, "Foundation intervals must be positive");
+static_assert(MPU_REGISTER_READY_WAIT_MS > 0 && MPU_WAKE_SETTLE_MS > 0 &&
+                  MPU_ACCEL_SETTLE_MS > 0 && MPU_ACCEL_LOG_MS > 0,
+              "MPU intervals must be positive");
 
 }  // namespace Config

@@ -10,7 +10,7 @@ struct Vec3 {
   float z = 0.0f;
 };
 
-enum class Error { None, NotAvailable };
+enum class Error { None, NotAvailable, I2cWrite, I2cRead, UnexpectedIdentity, ConfigurationMismatch };
 
 template <typename T>
 struct Result {
