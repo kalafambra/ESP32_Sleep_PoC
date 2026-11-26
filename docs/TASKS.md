@@ -39,6 +39,8 @@ Scope:
 
 Merge gate: compile; owner observes stable magnitude approximately 1 g flat and appropriate changes when rotated, verifies sign and scale, tests missing sensor handling if feasible. No claim of full calibration. Unit test conversion/sign if practical. Record real evidence. Do not implement T03 yet.
 
+Board verification for HW-03 records how AD0 is held low, the configured MPU6050 I²C address, the `WHO_AM_I` result, and startup register readbacks.
+
 ## T03 — Autonomous motion detection and latch validation (critical risk)
 Branch: `feat/T03-motion-interrupt` | Depends: T02 | Requirements: IMP-01..04, V06/V07
 
@@ -48,6 +50,8 @@ Scope:
 - Add diagnostic latch-hold test: deliberately defer ack for a bounded test window while observing GPIO4, perform unrelated accel reads, then acknowledge and report state. Disable by default outside test mode. Record actual behavior.
 
 Merge gate: compile; on hardware deliberate taps produce observable motion interrupts, pin remains asserted until intended ack, unrelated reads do not clear, acknowledgement deasserts under stationary conditions. Tap sensitivity is exploratory, not numeric acceptance. If latch or motion detector fails, stop and diagnose before downstream sleep integration; don't fake events or switch to data-ready IRQ. Document any tuning of raw threshold and reason. T03 is an early go/no-go for architecture.
+
+With the HW-03 wiring, confirm that a tap asserts GPIO4, an acceleration read leaves it asserted, and explicit `INT_STATUS` acknowledgement releases it.
 
 ## T04 — BOOT control and lifecycle (awake)
 Branch: `feat/T04-button-lifecycle` | Depends: T03 | Requirements: ARM-01..05, V02/V03
