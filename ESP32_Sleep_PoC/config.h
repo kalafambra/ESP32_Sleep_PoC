@@ -27,6 +27,10 @@ constexpr uint8_t ENV_SAMPLE_COUNT = 4;
 constexpr uint8_t ENV_TEMP_OVERSAMPLING = 2;
 constexpr uint8_t ENV_HUM_OVERSAMPLING = 4;
 constexpr uint8_t ENV_PRES_OVERSAMPLING = 16;
+constexpr uint32_t ENV_RESET_SETTLE_MS = 5;
+constexpr uint32_t ENV_CONVERSION_CHECK_MS = 60;
+constexpr uint32_t ENV_CONVERSION_RECHECK_MS = 5;
+constexpr uint32_t ENV_CONVERSION_TIMEOUT_MS = 150;
 
 constexpr uint32_t TILT_INTERVAL_MS = 1000;
 constexpr float TILT_THRESHOLD_DEG = 30.0f;
@@ -57,8 +61,8 @@ constexpr bool ENABLE_IMPACT_DETECTION = true;
 constexpr bool ENABLE_TILT_DETECTION = true;
 constexpr bool ENABLE_ENV_ACQUISITION = true;
 
-enum class TestMode { None, FoundationUptime, MpuAcceleration, MotionLatch, ButtonLifecycle };
-constexpr TestMode TEST_MODE = TestMode::None;
+enum class TestMode { None, FoundationUptime, MpuAcceleration, MotionLatch, ButtonLifecycle, Environment };
+constexpr TestMode TEST_MODE = TestMode::Environment;
 constexpr uint8_t MOTION_LATCH_TEST_THRESHOLD_RAW = 40;
 constexpr uint8_t MPU_MOTION_THRESHOLD_RAW =
     TEST_MODE == TestMode::MotionLatch ? MOTION_LATCH_TEST_THRESHOLD_RAW : IMPACT_THRESHOLD_RAW;
@@ -82,6 +86,14 @@ static_assert(ENV_SAMPLE_COUNT > 0 && ENV_INTERVAL_MS > 0, "Environmental count 
 static_assert(validOversampling(ENV_TEMP_OVERSAMPLING) && validOversampling(ENV_HUM_OVERSAMPLING)
                   && validOversampling(ENV_PRES_OVERSAMPLING),
               "Use supported BME280 oversampling multipliers");
+// Bosch BME280 datasheet section 9.1, maximum conversion time in microseconds.
+static_assert(ENV_CONVERSION_CHECK_MS * 1000ULL >
+                  2400 + 2300 * (ENV_TEMP_OVERSAMPLING + ENV_HUM_OVERSAMPLING + ENV_PRES_OVERSAMPLING) &&
+                  ENV_CONVERSION_CHECK_MS < ENV_CONVERSION_TIMEOUT_MS && ENV_CONVERSION_RECHECK_MS > 0,
+              "BME280 completion checks must leave time for the configured oversampling");
+static_assert(ENV_INTERVAL_MS >
+                  ENV_SAMPLE_COUNT * (ENV_CONVERSION_TIMEOUT_MS + 2ULL * I2C_TIMEOUT_MS),
+              "Environmental interval must accommodate a complete burst");
 static_assert(TILT_INTERVAL_MS > 0 && TILT_PERSISTENCE_MS > 0, "Tilt interval and persistence must be positive");
 static_assert(TILT_THRESHOLD_DEG >= 5.0f && TILT_THRESHOLD_DEG <= 90.0f, "Tilt threshold must be 5 to 90 degrees");
 static_assert(TILT_HYSTERESIS_DEG > 0 && TILT_HYSTERESIS_DEG < TILT_THRESHOLD_DEG, "Invalid tilt hysteresis");

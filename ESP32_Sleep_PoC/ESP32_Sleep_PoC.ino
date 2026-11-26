@@ -6,6 +6,7 @@
 
 #include "Button.h"
 #include "DeviceController.h"
+#include "EnvironmentSensor.h"
 #include "MotionSensor.h"
 #include "TiltDetector.h"
 #include "Uptime.h"
@@ -17,8 +18,13 @@ constexpr bool statusLedEnabled = Config::ENABLE_STATUS_LED && Config::STATUS_LE
 constexpr bool uptimeTestEnabled = Config::TEST_MODE == Config::TestMode::FoundationUptime;
 constexpr bool accelTestEnabled = Config::TEST_MODE == Config::TestMode::MpuAcceleration;
 constexpr bool latchTestEnabled = Config::TEST_MODE == Config::TestMode::MotionLatch;
-constexpr bool lifecycleTestEnabled = Config::TEST_MODE == Config::TestMode::ButtonLifecycle;
+constexpr bool environmentTest = Config::TEST_MODE == Config::TestMode::Environment;
+constexpr bool environmentTestEnabled = environmentTest && Config::ENABLE_ENV_ACQUISITION;
+constexpr bool lifecycleTestEnabled = Config::TEST_MODE == Config::TestMode::ButtonLifecycle || environmentTest;
 MotionSensor motionSensor(Wire);
+EnvironmentSensor environmentSensor(Wire, uptimeMs);
+UptimeMs nextEnvironmentMs = NO_DEADLINE_MS;
+uint8_t environmentFailures = 0;
 Button bootButton;
 DeviceController lifecycle;
 ReferenceCollector referenceCollector;
@@ -92,14 +98,16 @@ void printMpuStartup(bool wireReady, const MotionSensor::Initialization &mpu) {
 }
 
 void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool bluetoothOff,
-                        const MotionSensor::Initialization &mpu) {
-  Serial0.printf("ESP32 Sleep PoC | T05 reference and tilt | Arduino-ESP32 %s\n", ESP_ARDUINO_VERSION_STR);
+                        const MotionSensor::Initialization &mpu,
+                        const EnvironmentSensor::Initialization &bme) {
+  Serial0.printf("ESP32 Sleep PoC | T06 environmental acquisition | Arduino-ESP32 %s\n", ESP_ARDUINO_VERSION_STR);
   const char *mode = uptimeTestEnabled ? "foundation uptime test" : "normal";
   if (accelTestEnabled) {
     mode = "MPU acceleration test";
   }
   if (latchTestEnabled) mode = "MPU motion latch test";
   if (lifecycleTestEnabled) mode = "BOOT lifecycle test";
+  if (environmentTest) mode = "BME280 acquisition test";
   Serial0.printf("Mode %s | CPU target %lu MHz, actual %lu MHz | UART %lu baud (TX GPIO%d, RX GPIO%d)\n",
                  mode,
                  static_cast<unsigned long>(Config::CPU_FREQ_MHZ), static_cast<unsigned long>(getCpuFrequencyMhz()),
@@ -110,9 +118,22 @@ void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool b
   Serial0.printf("BOOT GPIO%d active LOW | LED GPIO%d active HIGH (%s) | MPU INT GPIO%d active HIGH\n",
                  Config::BOOT_PIN, Config::STATUS_LED_PIN, onOff(statusLedEnabled), Config::MPU_INT_PIN);
   printMpuStartup(wireReady, mpu);
-  Serial0.printf("BME280 identity check pending | expected at 0x%02X or 0x%02X\n",
-                 static_cast<unsigned>(Config::BME_PRIMARY_ADDRESS),
-                 static_cast<unsigned>(Config::BME_SECONDARY_ADDRESS));
+  if (environmentTestEnabled) {
+    if (bme.address != 0) {
+      Serial0.printf("BME probe | address 0x%02X | chip ID 0x%02X\n", bme.address, bme.chipId);
+    }
+    if (bme.error == EnvironmentSensor::Error::None) {
+      Serial0.printf("BME280 ready | %u forced samples every %lu ms | T x%u RH x%u P x%u | IIR off\n",
+                     Config::ENV_SAMPLE_COUNT, static_cast<unsigned long>(Config::ENV_INTERVAL_MS),
+                     Config::ENV_TEMP_OVERSAMPLING, Config::ENV_HUM_OVERSAMPLING,
+                     Config::ENV_PRES_OVERSAMPLING);
+    } else {
+      printTimestamp(uptimeMs());
+      Serial0.printf("ENV_INIT_ERROR | %s\n", EnvironmentSensor::errorText(bme.error));
+    }
+  } else {
+    Serial0.println("BME280 acquisition inactive in this build");
+  }
   Serial0.printf("Feature settings | Impact %s | Tilt %s | Environment %s | Sleep %s | Status LED %s\n",
                  onOff(Config::ENABLE_IMPACT_DETECTION), onOff(Config::ENABLE_TILT_DETECTION),
                  onOff(Config::ENABLE_ENV_ACQUISITION), onOff(Config::ENABLE_SLEEP), onOff(statusLedEnabled));
@@ -126,7 +147,7 @@ void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool b
                    onOff(Config::ENABLE_TILT_DETECTION), static_cast<unsigned long>(Config::TILT_INTERVAL_MS),
                    Config::TILT_THRESHOLD_DEG, Config::TILT_THRESHOLD_DEG - Config::TILT_HYSTERESIS_DEG,
                    static_cast<unsigned long>(Config::TILT_PERSISTENCE_MS));
-    Serial0.println("CPU awake | environmental acquisition and light sleep pending");
+    Serial0.printf("CPU awake | environment diagnostic %s | light sleep pending\n", onOff(environmentTestEnabled));
   } else {
     Serial0.println("Integrated monitoring pending | CPU awake");
   }
@@ -165,12 +186,19 @@ void logAcceleration(UptimeMs nowMs) {
                  a.x, a.y, a.z, magnitudeG);
 }
 
+void cancelEnvironment() {
+  if (!environmentTestEnabled) return;
+  environmentSensor.cancel();
+  nextEnvironmentMs = NO_DEADLINE_MS;
+}
+
 void stopMotion(const char *reason) {
   motionDiagnosticRunning = false;
   const Error cleanup = motionSensor.disableMotion();
   printTimestamp(uptimeMs());
   if (lifecycleTestEnabled) {
     lifecycle.enterFault();
+    cancelEnvironment();
     tiltDetector.disarm();
     referenceCollector = ReferenceCollector{};
     setStatusLed(false);
@@ -255,6 +283,7 @@ bool checkLifecycleAccel(const Result<Vec3> &sample, UptimeMs nowMs, bool report
 
   const bool wasArmed = lifecycle.state() == DeviceController::State::Armed;
   lifecycle.enterFault();
+  cancelEnvironment();
   tiltDetector.disarm();
   referenceCollector = ReferenceCollector{};
   setStatusLed(false);
@@ -322,6 +351,10 @@ void serviceLifecycle(UptimeMs nowMs) {
       }
       const UptimeMs armedMs = uptimeMs();
       if (Config::ENABLE_TILT_DETECTION) tiltDetector.arm(armedMs, outcome.reference);
+      if (environmentTestEnabled) {
+        nextEnvironmentMs = armedMs + Config::ENV_INTERVAL_MS;
+        environmentFailures = 0;
+      }
       lifecycle.completeArm();
       setStatusLed(false);
       printTimestamp(armedMs);
@@ -330,6 +363,7 @@ void serviceLifecycle(UptimeMs nowMs) {
       return;
     }
     case DeviceController::Event::Disarmed:
+      cancelEnvironment();
       tiltDetector.disarm();
       referenceCollector = ReferenceCollector{};
       setStatusLed(false);
@@ -369,6 +403,46 @@ void serviceLifecycleAcceleration(UptimeMs nowMs) {
   }
 }
 
+void serviceEnvironment(UptimeMs nowMs) {
+  if (nextEnvironmentMs == NO_DEADLINE_MS) return;
+  if (nowMs >= nextEnvironmentMs) {
+    const UptimeMs dueSlots = 1 + (nowMs - nextEnvironmentMs) / Config::ENV_INTERVAL_MS;
+    nextEnvironmentMs += dueSlots * Config::ENV_INTERVAL_MS;
+    if (dueSlots == 1 && environmentSensor.start()) {
+      printTimestamp(nowMs);
+      Serial0.println("ENV_BURST_STARTED");
+    } else {
+      printTimestamp(nowMs);
+      Serial0.printf("ENV_MISSED | skipped %llu slots\n", dueSlots);
+    }
+  }
+  environmentSensor.tick(uptimeMs());
+  EnvironmentSensor::Burst result;
+  if (!environmentSensor.takeResult(result)) return;
+  printTimestamp(uptimeMs());
+  if (result.error == EnvironmentSensor::Error::None) {
+    environmentFailures = 0;
+    Serial0.printf("ENV_REPORT | temperature %.2f C | humidity %.2f %%RH | pressure %.2f hPa | samples %u\n",
+                   result.average.temperatureC, result.average.humidityPercent, result.average.pressureHpa,
+                   result.samples);
+    return;
+  }
+  Serial0.printf("ENV_ERROR | %s | consecutive failures %u/%u\n",
+                 EnvironmentSensor::errorText(result.error), ++environmentFailures, Config::SENSOR_FAILURE_LIMIT);
+  if (environmentFailures < Config::SENSOR_FAILURE_LIMIT) return;
+
+  lifecycle.enterFault();
+  cancelEnvironment();
+  tiltDetector.disarm();
+  referenceCollector = ReferenceCollector{};
+  setStatusLed(false);
+  const bool motionEnabled = Config::ENABLE_IMPACT_DETECTION;
+  const Error cleanup = motionEnabled ? motionSensor.disableMotion() : Error::None;
+  printTimestamp(uptimeMs());
+  Serial0.printf("ENV_FAULT | repeated burst failures | motion disable/clear: %s | FAULT | reset after inspection\n",
+                 motionEnabled ? errorText(cleanup) : "already disabled");
+}
+
 }  // namespace
 
 void setup() {
@@ -388,7 +462,8 @@ void setup() {
   const bool wireReady = Wire.begin(Config::I2C_SDA_PIN, Config::I2C_SCL_PIN, Config::I2C_CLOCK_HZ);
   Wire.setTimeOut(Config::I2C_TIMEOUT_MS);
   const auto mpu = wireReady ? motionSensor.begin() : MotionSensor::Initialization{};
-  printStartupBanner(cpuConfigured, wireReady, wifiOff, bluetoothOff, mpu);
+  const auto bme = wireReady && environmentTestEnabled ? environmentSensor.begin() : EnvironmentSensor::Initialization{};
+  printStartupBanner(cpuConfigured, wireReady, wifiOff, bluetoothOff, mpu, bme);
   const UptimeMs nowMs = uptimeMs();
   if (lifecycleTestEnabled) {
     bootButton = Button(digitalRead(Config::BOOT_PIN) == LOW, nowMs);
@@ -396,6 +471,8 @@ void setup() {
       armingBlockReason = "platform startup failed";
     } else if (mpu.error != Error::None) {
       armingBlockReason = errorText(mpu.error);
+    } else if (environmentTestEnabled && bme.error != EnvironmentSensor::Error::None) {
+      armingBlockReason = "required BME280 unavailable (see ENV_INIT_ERROR)";
     }
   }
   nextUptimeLogMs = nowMs + Config::FOUNDATION_UPTIME_LOG_MS;
@@ -422,6 +499,9 @@ void loop() {
       serviceMotion(uptimeMs());
     }
     serviceLifecycleAcceleration(uptimeMs());
+    if (environmentTestEnabled && lifecycle.state() == DeviceController::State::Armed) {
+      serviceEnvironment(uptimeMs());
+    }
     yield();
     return;
   }
