@@ -1,8 +1,7 @@
 #pragma once
 
-#include <initializer_list>
-
 #include "Button.h"
+#include "SchedulerDeadlines.h"
 #include "TiltDetector.h"
 
 class DeviceController {
@@ -15,6 +14,7 @@ class DeviceController {
     bool bootWakeEnabled;
     bool motionWakeEnabled;
     bool bootPressed;
+    SchedulerDeadlines deadlines;
   };
 
   void initializeButton(UptimeMs nowMs, bool pressed) { button_ = Button(pressed, nowMs); }
@@ -151,14 +151,22 @@ class DeviceController {
     const UptimeMs nowMs = io.now();
     const UptimeMs retryMs = io.motionRetryAt();
     const bool motionReady = motionEnabled && nowMs >= retryMs;
-    UptimeMs deadlineMs = button_.nextDeadline(buttonCheckedMs);
+    const SchedulerDeadlines deadlines{{
+        button_.nextDeadline(buttonCheckedMs),
+        referenceStarted_ ? NO_DEADLINE_MS : deadlineMs_,
+        referenceStarted_ ? deadlineMs_ : NO_DEADLINE_MS,
+        reference_.nextDeadline(),
+        tilt_.nextDeadline(),
+        nextEnvironmentMs_,
+        io.environmentDeadline(),
+        motionEnabled && retryMs != 0 ? retryMs : NO_DEADLINE_MS,
+    }};
+    UptimeMs deadlineMs = NO_DEADLINE_MS;
     if (bootChanged || (motionReady && motionAsserted)) deadlineMs = nowMs;
-    for (const UptimeMs deadline : {deadlineMs_, reference_.nextDeadline(), tilt_.nextDeadline(),
-                                  nextEnvironmentMs_, io.environmentDeadline()}) {
+    for (const UptimeMs deadline : deadlines.at) {
       if (deadline < deadlineMs) deadlineMs = deadline;
     }
-    if (motionEnabled && retryMs != 0 && retryMs < deadlineMs) deadlineMs = retryMs;
-    return {deadlineMs, !button_.wakeMasked(), motionReady, bootPressed};
+    return {deadlineMs, !button_.wakeMasked(), motionReady, bootPressed, deadlines};
   }
 
   Button button_;

@@ -11,6 +11,7 @@
 #include "EnvironmentSensor.h"
 #include "MotionSensor.h"
 #include "PowerManager.h"
+#include "SleepTrace.h"
 #include "TiltDetector.h"
 #include "Uptime.h"
 #include "config.h"
@@ -22,16 +23,20 @@ constexpr bool uptimeTestEnabled = Config::TEST_MODE == Config::TestMode::Founda
 constexpr bool accelTestEnabled = Config::TEST_MODE == Config::TestMode::MpuAcceleration;
 constexpr bool latchTestEnabled = Config::TEST_MODE == Config::TestMode::MotionLatch;
 constexpr bool environmentTest = Config::TEST_MODE == Config::TestMode::Environment;
-constexpr bool normalMode = Config::TEST_MODE == Config::TestMode::None;
+constexpr bool sleepTraceMode = Config::TEST_MODE == Config::TestMode::SleepTrace;
+constexpr bool fullMonitoringMode = Config::TEST_MODE == Config::TestMode::None || sleepTraceMode;
 constexpr bool lifecycleTest = Config::TEST_MODE == Config::TestMode::ButtonLifecycle;
-constexpr bool monitoringEnabled = normalMode || lifecycleTest || environmentTest;
-constexpr bool environmentEnabled = (normalMode || environmentTest) && Config::ENABLE_ENV_ACQUISITION;
-constexpr bool lightSleepEnabled = (normalMode || environmentTest) && Config::ENABLE_SLEEP;
+constexpr bool monitoringEnabled = fullMonitoringMode || lifecycleTest || environmentTest;
+constexpr bool environmentEnabled = (fullMonitoringMode || environmentTest) && Config::ENABLE_ENV_ACQUISITION;
+constexpr bool lightSleepEnabled = (fullMonitoringMode || environmentTest) && Config::ENABLE_SLEEP;
+constexpr bool sleepTraceEnabled = sleepTraceMode && lightSleepEnabled;
 MotionSensor motionSensor(Wire);
 EnvironmentSensor environmentSensor(Wire, uptimeMs);
 uint8_t environmentFailures = 0;
 DeviceController lifecycle;
-PowerManager power;
+void writeSleepTrace(const char *line) { Serial0.print(line); }
+SleepTrace sleepTrace(writeSleepTrace);
+PowerManager power(sleepTraceEnabled ? &sleepTrace : nullptr);
 uint64_t armedAtUs = 0;
 StaticSemaphore_t schedulerWakeStorage;
 SemaphoreHandle_t schedulerWake = nullptr;
@@ -106,7 +111,7 @@ void printMpuStartup(bool wireReady, const MotionSensor::Initialization &mpu) {
 void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool bluetoothOff,
                         const MotionSensor::Initialization &mpu,
                         const EnvironmentSensor::Initialization &bme) {
-  Serial0.printf("ESP32 Sleep PoC | T08 | Arduino-ESP32 %s | ESP-IDF %s\n",
+  Serial0.printf("ESP32 Sleep PoC | T08A | Arduino-ESP32 %s | ESP-IDF %s\n",
                  ESP_ARDUINO_VERSION_STR, ESP.getSdkVersion());
   const char *mode = uptimeTestEnabled ? "foundation uptime test" : "normal";
   if (accelTestEnabled) {
@@ -115,6 +120,7 @@ void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool b
   if (latchTestEnabled) mode = "MPU motion latch test";
   if (lifecycleTest) mode = "BOOT lifecycle test";
   if (environmentTest) mode = "BME280 acquisition test";
+  if (sleepTraceMode) mode = "SleepTrace";
   Serial0.printf("Mode %s | CPU target %lu MHz, actual %lu MHz | UART %lu baud (TX GPIO%d, RX GPIO%d)\n",
                  mode,
                  static_cast<unsigned long>(Config::CPU_FREQ_MHZ), static_cast<unsigned long>(getCpuFrequencyMhz()),
@@ -504,7 +510,8 @@ void idleScheduler(const DeviceController::IdleState &idle) {
     return;
   }
 
-  const auto result = power.sleepUntil(idle.deadlineMs, idle.bootWakeEnabled, idle.motionWakeEnabled, idle.bootPressed);
+  const auto result = power.sleepUntil(idle.deadlineMs, idle.bootWakeEnabled, idle.motionWakeEnabled,
+                                       idle.bootPressed, idle.deadlines);
   if (result.action == PowerManager::Action::WaitAwake) {
     waitAwake(std::min(idle.deadlineMs, uptimeMs() + Config::SLEEP_RETRY_MS));
   } else if (result.action == PowerManager::Action::Fault) {
@@ -577,10 +584,18 @@ void setup() {
 
 void loop() {
   if (monitoringEnabled) {
+    // During trace TX deferral, keep the original deadlines and input levels.
+    // PowerManager rechecks them before sleeping or returning to normal service.
+    static DeviceController::IdleState announcedIdle{};
+    if (sleepTraceEnabled && sleepTrace.pending()) {
+      idleScheduler(announcedIdle);
+      return;
+    }
     SchedulerIo io;
     const bool wasArmed = lifecycle.state() == DeviceController::State::Armed;
     const auto idle = lifecycle.run(io);
     if (wasArmed && lifecycle.state() != DeviceController::State::Armed) reportSleepStats();
+    if (sleepTraceEnabled) announcedIdle = idle;
     idleScheduler(idle);
     return;
   }
