@@ -51,7 +51,7 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 | T04 | MERGED | normal and ButtonLifecycle builds passed, eight fake-time assertions passed | Owner confirmed short press, held press, disarm and both cancellation paths. Countdown and reset-to-DISARMED observed. | Merge `6c32bdb`. |
 | T05 | IMPLEMENTED_PENDING_VERIFICATION | both Arduino builds and nine lifecycle assertions passed; native tilt suite compiled, execution blocked | Owner completed the hardware merge-gate checks, including slow tilt with impact disabled and transient rejection | Windows Application Control blocked the native test executable. |
 | T06 | MERGED | Three Arduino builds and fake-bus tests passed | Owner verified V08 cadence, identity and four-sample reports. Tilt cleared during a burst. Impact reports observed between bursts. | Merge `dff6a53` on `origin/master`. Impact inside a burst still to capture during T07 verification. |
-| T07 | IMPLEMENTED_PENDING_VERIFICATION | Normal and all five diagnostic ESP32 builds passed. Deterministic suites passed. | Owner board verification pending | Full awake baseline. See T07 handoff for the merge gate. |
+| T07 | MERGED | Normal and all five diagnostic ESP32 builds passed. Deterministic suites passed. | Owner trace confirms cadence, tilt transitions, an in-burst impact and BOOT disarm. Rearm reported by owner. | Merge `a81a0a7` on `origin/master`. In-burst disarm passed with fake time and I/O. The V11 board case remains open. |
 | T08 | NOT_STARTED | pending | pending | |
 | T09 | NOT_STARTED | pending | pending | |
 | T10 | NOT_STARTED | pending | pending | |
@@ -310,16 +310,29 @@ Board checklist for reproducing the T06 observations and completing the remainin
 
 ### T07 cooperative scheduler · 2026-11-26 · `feat/T07-scheduler`
 
-#### Before merging T07
+#### Owner board results
 
-[T07 in TASKS.md](TASKS.md) defines the merge criteria. The build and deterministic tests have passed. The remaining step is to run the integrated firmware on your ESP32 and save the results below.
+The submitted trace is from the T07 Environment diagnostic on Arduino-ESP32 `3.3.12`, with sleep off. The checked-out test commit `9e4f12e` sets `TestMode::Environment` and raw impact threshold `25`. The requirements list `50` as the baseline tuning default.
+
+- Boot showed `DISARMED`, MPU6050 at `0x68`, and BME280 at `0x76` with chip ID `0x60`. Zeroing accepted 200 samples and `ARMED` appeared at `00:00:13.920`.
+- The first BME burst started 10.000 s after arming. All 25 starts were 10.000 s apart at serial timestamp precision. Each produced one four-sample report 248 ms after the start.
+- The trace shows one `TILT_DETECTED` at `00:01:27.920` (58.55°) and one `TILT_CLEARED` at `00:01:37.920` (0.32°), with the environmental cadence intact. The owner reports completing the tilt trials. The deterministic tests cover the 1 s check schedule and the 5 s persistence timing.
+- V10 in-burst impact observed. The burst started at `00:04:03.920`, `IMPACT_DETECTED count=9` appeared at `00:04:04.033`, and the four-sample `ENV_REPORT` appeared at `00:04:04.168`. The next burst started at `00:04:13.920`, on the same phase.
+- BOOT disarmed the board at `00:04:29.422` between bursts. The owner reports verifying the other steps, including rearm. The submitted trace ends at `DISARMED`.
+- For in-burst disarm, `tests/t07_scheduler.cpp` qualifies BOOT while the fake BME conversion step completes and asserts that the result is cancelled before publication. The 248 ms conversion window makes a hand-timed BOOT hold impractical. The V11 on-board overlap remains open. This trace records no hardware pass or waiver for that case.
+
+The original `feat/T07-scheduler` branch merged into `origin/master` at `a81a0a7`. The owner opened `feat/T07-scheduler2` to complete and record the remaining board tests after the merge.
+
+#### Reproduce the awake board checks
+
+[T07 in TASKS.md](TASKS.md) defines the merge criteria.
 
 1. **Upload the Environment diagnostic.** In `ESP32_Sleep_PoC/config.h`, set `TEST_MODE` to `TestMode::Environment`. It runs the full awake scheduler and prints `ENV_BURST_STARTED` so you can time the overlap tests. In Arduino IDE, select **ESP32 Dev Module** and your board's port, upload, and open Serial Monitor at **115200 baud**. Reset with BOOT released. Check for `DISARMED` and both sensors ready. With the board flat, hold BOOT for about half a second, release, and leave the board still until `ARMED`.
 2. **Verify environmental cadence.** Save `ARMED` and at least five consecutive `ENV_BURST_STARTED` / `ENV_REPORT` pairs. The first burst should start about 10 s after `ARMED`, and later starts should be about 10 s apart. Each burst should produce one report with `samples 4` and plausible readings. A burst took about 250 ms on the T06 board. Use your observed timing for the next tests.
 3. **Verify tilt and persistence.** Tilt to about 45° and return flat within 3 s. Expect no tilt event. Then tilt to about 45° and hold for 10 s, followed by flat for 10 s. Expect one `TILT_DETECTED` and one `TILT_CLEARED`, each typically about 6–7 s after the movement with the filter and five-second persistence. The deterministic tests verify the 1 s schedule and exact 5 s persistence. If you have an I²C analyzer, you can also confirm the 1 s acceleration reads on the board. Save the tilt events and surrounding environmental reports to show both continued to work.
 4. **Catch a tap inside a burst.** Use the observed 10 s cadence to predict the next start and tap just after it. Save this order from the same burst: `ENV_BURST_STARTED`, `IMPACT_DETECTED`, `ENV_REPORT`. An impact logged between bursts leaves this check pending. Confirm the following burst stays on the 10 s schedule.
-5. **Disarm inside a burst, then rearm.** For a roughly 250 ms burst, start holding BOOT about 0.2 s before the predicted start so the press qualifies during conversion. Save `ENV_BURST_STARTED` followed by `DISARMED` and keep recording until the next expected slot has passed. There should be no `ENV_REPORT` for the interrupted burst and no new burst while disarmed. Release BOOT, then press again and keep the board stationary at a different orientation through zeroing. Save the new `ZEROING_OK`, `ARMED`, and first burst start about 10 s later.
-6. **Record the result and restore normal mode.** Paste the timestamped excerpts into STATUS or share them for recording. Set `TEST_MODE` back to `TestMode::None` before committing. Once the board checks pass and the evidence is recorded, T07 is ready for your review and merge. Record failures and leave unobserved checks pending.
+5. **Disarm with BOOT and rearm.** Hold BOOT at a convenient time and capture `DISARMED`. Release BOOT, then press again and keep the board stationary at a different orientation through zeroing. Save the new `ZEROING_OK`, `ARMED`, and first burst start about 10 s later. Use the deterministic test for the conversion/disarm overlap.
+6. **Record the result and restore normal mode.** Add timestamped excerpts and record any failed or unobserved checks. Select `TestMode::None` for the normal build.
 
 #### Implementation and test evidence
 
