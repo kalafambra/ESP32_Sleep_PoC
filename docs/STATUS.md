@@ -46,7 +46,7 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 | T01 | MERGED | normal and uptime diagnostic passed | owner board check passed | Merge `78d6897` |
 | T02 | MERGED | updated normal and both diagnostics passed | owner retest passed | Tip 171f429 present on master. Optional missing-module check unreported. |
 | T03 | MERGED | raw 40 MotionLatch and raw 50 normal rebuilds passed | V06 and awake V07 passed at raw 50 | Tip `592b99f` on `master` with normal mode selected. Raw 40 sensitivity trial pending. |
-| T04 | IMPLEMENTED_PENDING_VERIFICATION | normal and ButtonLifecycle builds passed, eight fake-time assertions passed | V02/V03 board checks pending | Reference timing hook only. |
+| T04 | VERIFIED | normal and ButtonLifecycle builds passed, eight fake-time assertions passed | Owner confirmed short press, held press, disarm and both cancellation paths. Countdown and reset-to-DISARMED observed. | BOOT merge gate met. Reference timing hook only. |
 | T05 | NOT_STARTED | pending | pending | |
 | T06 | NOT_STARTED | pending | pending | |
 | T07 | NOT_STARTED | pending | pending | |
@@ -188,11 +188,15 @@ $content.Replace('TEST_MODE = TestMode::None;', 'TEST_MODE = TestMode::ButtonLif
 & $cli compile --config-file $configPath --fqbn esp32:esp32:esp32 --build-path build-t04-diagnostic/firmware $stage
 ```
 
-Owner board checks for V02/V03 and diagnostic motion, all pending.
+Owner board checks for V02/V03 and diagnostic motion.
 
 1. Verify wiring as above. With BOOT released, upload the ButtonLifecycle build using the staged sketch or select `TestMode::ButtonLifecycle` in Arduino IDE. Open Serial Monitor at 115200 baud and reset. Capture `Mode BOOT lifecycle test` and `DISARMED` with the optional LED off.
 2. Tap BOOT briefly and confirm no lifecycle event. Hold BOOT through the whole countdown and confirm exactly one `ARMING_STARTED`, then `ZEROING_STARTED` around +8 s and `ZEROING_SKIPPED` and diagnostic `ARMED` around +10 s. The optional LED is solid during the countdown and off when armed. Keep holding briefly after `ARMED` and confirm the hold produces no second command.
-3. Release BOOT, then hold again to disarm once. Repeat and cancel one attempt before `ZEROING_STARTED` and another during the final window. In each case, expect `DISARMED | arming cancelled` and no later arm from that attempt. Complete a fresh countdown, then reset while diagnostic ARMED with BOOT released and confirm a fresh DISARMED startup.
+3. Release BOOT, then hold again to disarm once. From DISARMED, hold to start arming, then release. A release leaves arming underway. For the first cancellation trial, give BOOT a second hold of about 1 s around +2 s after `ARMING_STARTED`. For the second trial, start a fresh countdown, release, then give BOOT a second hold as soon as `ZEROING_STARTED` appears. In each trial, expect `DISARMED | arming cancelled` and no later arm from that attempt. Complete a fresh countdown, then reset while diagnostic ARMED with BOOT released and confirm a fresh DISARMED startup.
 4. With impact enabled, try a deliberate known-detectable tap while disarmed, during countdown, and after diagnostic arming. Expect impact reports only while diagnostic ARMED. With the board still, disarm, rearm, and check that no stale impact is reported. The first detected tap in the new session should show `count=1`. If feasible, power off, disconnect the MPU, and boot the diagnostic again. Expect `MPU_INIT_ERROR` and `ARMING_REFUSED | FAULT` on a qualified press. Restore the sensor with power off.
 
-T04 awaits owner confirmation of BOOT behavior before merge. The diagnostic remains awake and the reference timing hook supplies no gravity reference.
+The owner reported that a short press did nothing, a long hold through arming issued one command, and a subsequent long hold disarmed. The supplied log shows power-on followed by DISARMED at 00:00:00.405, ARMING_STARTED at 00:00:06.314, ZEROING_STARTED at 00:00:14.314, ZEROING_SKIPPED at 00:00:16.314, and diagnostic ARMED at 00:00:16.316. The MPU identity and startup readbacks matched. The log shows IMPACT_DETECTED count=1 at 00:00:26.551 and DISARMED at 00:00:28.861.
+
+In the first cancellation attempts, releasing the initial press let the countdown continue to ARMED, as specified by ARM-03. The owner then confirmed cancellation with a second qualified hold in both windows. The first trial logged ARMING_STARTED at 00:00:01.985 and DISARMED with arming cancelled at 00:00:03.388, 1.403 s into the countdown. The second logged ARMING_STARTED at 00:00:14.376, ZEROING_STARTED at 00:00:22.376 and DISARMED with arming cancelled at 00:00:23.161, 0.785 s into the reference timing window. The supplied trace shows no ARMED event for either trial.
+
+The T04 merge gate in TASKS.md is met. The owner's working copy currently selects ButtonLifecycle for board testing. Restore None before including config.h in a commit. The full motion isolation and stale-event rearm board checks remain unreported. The diagnostic remains awake and the reference timing hook supplies no gravity reference.
