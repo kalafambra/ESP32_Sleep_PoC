@@ -19,6 +19,13 @@ constexpr uint8_t ACCEL_CONFIG = 0x1C;
 constexpr uint8_t ACCEL_XOUT_H = 0x3B;
 constexpr uint8_t FIFO_EN = 0x23;
 constexpr uint8_t INT_ENABLE = 0x38;
+// InvenSense RM-MPU-6000A-00 rev 3.2, sections 4.5, 4.8-4.9 and INT register map.
+constexpr uint8_t MOT_THR = 0x1F;
+constexpr uint8_t MOT_DUR = 0x20;
+constexpr uint8_t INT_PIN_CFG = 0x37;
+constexpr uint8_t INT_STATUS = 0x3A;
+constexpr uint8_t MOTION_BIT = 0x40;
+constexpr uint8_t MOTION_HPF_5HZ = 0x01;
 constexpr uint8_t USER_CTRL = 0x6A;
 
 constexpr uint8_t ACCEL_RANGE_8G = 2 << 3;
@@ -37,7 +44,10 @@ constexpr RegisterSetting settings[] = {
     {USER_CTRL, 0x00},  // DMP, FIFO, auxiliary I2C master off
     {FILTER_CONFIG, 0x01},  // 184 Hz accel DLPF, 1 kHz rate before division
     {SMPLRT_DIV, 0x00},  // Divide by (1 + 0)
-    {ACCEL_CONFIG, ACCEL_RANGE_8G},
+    {ACCEL_CONFIG, ACCEL_RANGE_8G | MOTION_HPF_5HZ},
+    {MOT_THR, Config::MPU_MOTION_THRESHOLD_RAW},
+    {MOT_DUR, Config::IMPACT_DURATION_MS},
+    {INT_PIN_CFG, 0x20},  // High, push-pull, latch until INT_STATUS read.
 };
 
 constexpr float decodeAccelG(uint8_t high, uint8_t low) {
@@ -56,6 +66,7 @@ static_assert(decodeAccelG(0x00, 0x00) == 0.0f && decodeAccelG(0x10, 0x00) == 1.
 
 MotionSensor::Initialization MotionSensor::begin() {
   ready_ = false;
+  motionEnabled_ = false;
   Initialization report;
   static_assert(sizeof(settings) / sizeof(settings[0]) ==
                     sizeof(report.readbacks) / sizeof(report.readbacks[0]),
@@ -123,6 +134,65 @@ Result<Vec3> MotionSensor::readAccel() {
     }
   }
   return result;
+}
+
+bool MotionSensor::interruptAsserted() const {
+  return digitalRead(Config::MPU_INT_PIN) == HIGH;
+}
+
+Result<uint8_t> MotionSensor::acknowledgeStatus() {
+  Result<uint8_t> status;
+  if (ready_) {
+    status.error = readRegisters(INT_STATUS, &status.value, 1);
+  }
+  return status;
+}
+
+Error MotionSensor::clearMotion() {
+  return acknowledgeStatus().error;
+}
+
+Error MotionSensor::setInterruptMask(uint8_t mask) {
+  Error error = writeRegister(INT_ENABLE, mask);
+  if (error != Error::None) return error;
+  uint8_t actual = 0;
+  error = readRegisters(INT_ENABLE, &actual, 1);
+  if (error != Error::None) return error;
+  return actual == mask ? Error::None : Error::ConfigurationMismatch;
+}
+
+Error MotionSensor::disableMotion() {
+  motionEnabled_ = false;
+  if (!ready_) return Error::NotAvailable;
+  const Error error = setInterruptMask(0);
+  return error == Error::None ? clearMotion() : error;
+}
+
+Error MotionSensor::enableMotion() {
+  if (!Config::ENABLE_IMPACT_DETECTION) return Error::NotAvailable;
+  const Error cleared = disableMotion();
+  if (cleared != Error::None) return cleared;
+  const Error error = setInterruptMask(MOTION_BIT);
+  if (error != Error::None) return error;
+  reported_ = suppressed_ = 0;
+  lastReportedMs_ = 0;
+  motionEnabled_ = true;
+  return Error::None;
+}
+
+Result<MotionSensor::Event> MotionSensor::readAndAcknowledgeMotion(UptimeMs recognitionMs) {
+  if (!motionEnabled_) return {};
+  const auto status = acknowledgeStatus();
+  if (!status.valid() || !(status.value & MOTION_BIT)) {
+    return {Event::NoMotion, status.error};
+  }
+  if (reported_ && recognitionMs - lastReportedMs_ < Config::IMPACT_SUPPRESSION_MS) {
+    ++suppressed_;
+    return {Event::Suppressed, Error::None};
+  }
+  ++reported_;
+  lastReportedMs_ = recognitionMs;
+  return {Event::Reported, Error::None};
 }
 
 Error MotionSensor::writeRegister(uint8_t reg, uint8_t value) {

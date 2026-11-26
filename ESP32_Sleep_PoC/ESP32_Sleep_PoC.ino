@@ -13,11 +13,19 @@ namespace {
 constexpr bool statusLedEnabled = Config::ENABLE_STATUS_LED && Config::STATUS_LED_PIN >= 0;
 constexpr bool uptimeTestEnabled = Config::TEST_MODE == Config::TestMode::FoundationUptime;
 constexpr bool accelTestEnabled = Config::TEST_MODE == Config::TestMode::MpuAcceleration;
+constexpr bool latchTestEnabled = Config::TEST_MODE == Config::TestMode::MotionLatch;
 MotionSensor motionSensor(Wire);
 UptimeMs nextUptimeLogMs = 0;
 UptimeMs nextAccelLogMs = 0;
 bool accelDiagnosticRunning = false;
 uint8_t consecutiveAccelErrors = 0;
+bool motionDiagnosticRunning = false;
+bool latchProbePending = true;
+bool holdingLatch = false;
+bool stayedHigh = true;
+UptimeMs holdStartedMs = 0;
+UptimeMs nextMotionCheckMs = 0;
+uint8_t motionFailures = 0;
 
 const char *onOff(bool enabled) {
   return enabled ? "on" : "off";
@@ -75,11 +83,12 @@ void printMpuStartup(bool wireReady, const MotionSensor::Initialization &mpu) {
 
 void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool bluetoothOff,
                         const MotionSensor::Initialization &mpu) {
-  Serial0.printf("ESP32 Sleep PoC | T02 MPU6050 acceleration | Arduino-ESP32 %s\n", ESP_ARDUINO_VERSION_STR);
+  Serial0.printf("ESP32 Sleep PoC | T03 MPU6050 motion interrupt | Arduino-ESP32 %s\n", ESP_ARDUINO_VERSION_STR);
   const char *mode = uptimeTestEnabled ? "foundation uptime test" : "normal";
   if (accelTestEnabled) {
     mode = "MPU acceleration test";
   }
+  if (latchTestEnabled) mode = "MPU motion latch test";
   Serial0.printf("Mode %s | CPU target %lu MHz, actual %lu MHz | UART %lu baud (TX GPIO%d, RX GPIO%d)\n",
                  mode,
                  static_cast<unsigned long>(Config::CPU_FREQ_MHZ), static_cast<unsigned long>(getCpuFrequencyMhz()),
@@ -96,7 +105,7 @@ void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool b
   Serial0.printf("Feature settings | Impact %s | Tilt %s | Environment %s | Sleep %s | Status LED %s\n",
                  onOff(Config::ENABLE_IMPACT_DETECTION), onOff(Config::ENABLE_TILT_DETECTION),
                  onOff(Config::ENABLE_ENV_ACQUISITION), onOff(Config::ENABLE_SLEEP), onOff(statusLedEnabled));
-  Serial0.println("T02 operation | Monitoring and light sleep unavailable | CPU awake");
+  Serial0.println("T03 operation | Integrated monitoring and light sleep unavailable | CPU awake");
   Serial0.printf("Radios | Wi-Fi %s | Bluetooth %s\n", wifiOff ? "off" : "shutdown failed",
                  bluetoothOff ? "off" : "shutdown failed");
 
@@ -132,6 +141,76 @@ void logAcceleration(UptimeMs nowMs) {
                  a.x, a.y, a.z, magnitudeG);
 }
 
+void stopMotionDiagnostic(const char *reason) {
+  motionDiagnosticRunning = false;
+  const Error cleanup = motionSensor.disableMotion();
+  printTimestamp(uptimeMs());
+  Serial0.printf("MOTION_FAULT | %s | disable/clear: %s | DISARMED | reset after inspection\n",
+                 reason, errorText(cleanup));
+}
+
+void serviceMotionDiagnostic(UptimeMs nowMs) {
+  if (nowMs < nextMotionCheckMs) return;
+  const bool high = motionSensor.interruptAsserted();
+  if (!holdingLatch && !high) {
+    motionFailures = 0;
+    return;
+  }
+
+  if (latchProbePending) {
+    if (!holdingLatch) {
+      holdStartedMs = nowMs;
+      holdingLatch = true;
+      const auto sample = motionSensor.readAccel();
+      stayedHigh = motionSensor.interruptAsserted();
+      Serial0.printf("LATCH_HOLD | GPIO4 before accel=1 after accel=%u | read=%s\n",
+                     stayedHigh, errorText(sample.error));
+      if (!sample.valid()) {
+        stopMotionDiagnostic(errorText(sample.error));
+        return;
+      }
+    }
+    stayedHigh = stayedHigh && high;
+    if (nowMs - holdStartedMs < Config::LATCH_TEST_HOLD_MS) return;
+    const auto sample = motionSensor.readAccel();
+    stayedHigh = stayedHigh && motionSensor.interruptAsserted();
+    if (!sample.valid()) {
+      stopMotionDiagnostic(errorText(sample.error));
+      return;
+    }
+  }
+
+  const auto event = motionSensor.readAndAcknowledgeMotion(nowMs);
+  const bool afterAck = motionSensor.interruptAsserted();
+  const bool verified = event.valid() && event.value != MotionSensor::Event::NoMotion;
+  if (holdingLatch) {
+    Serial0.printf("LATCH_ACK | held %llu ms | GPIO4 high throughout sampled reads=%u | motion bit=%u | after ack=%u | %s\n",
+                   nowMs - holdStartedMs, stayedHigh, verified, afterAck, errorText(event.error));
+    holdingLatch = latchProbePending = false;
+    if (!stayedHigh || !verified) {
+      stopMotionDiagnostic("latch probe failed");
+      return;
+    }
+  }
+  if (verified) {
+    printTimestamp(nowMs);
+    Serial0.printf("%s count=%llu suppressed=%llu\n",
+                   event.value == MotionSensor::Event::Reported ? "IMPACT_DETECTED" : "IMPACT_SUPPRESSED",
+                   motionSensor.reportedCount(), motionSensor.suppressedCount());
+  }
+  if (!verified || afterAck) {
+    printTimestamp(nowMs);
+    Serial0.printf("MOTION_CHECK | ack=%s motion bit=%u GPIO4=%u | attempt %u/%u\n",
+                   errorText(event.error), verified, afterAck, motionFailures + 1, Config::SENSOR_FAILURE_LIMIT);
+    if (++motionFailures >= Config::SENSOR_FAILURE_LIMIT) {
+      stopMotionDiagnostic("repeated status or latch failure");
+    }
+    nextMotionCheckMs = nowMs + Config::MOTION_RETRY_MS;
+  } else {
+    motionFailures = 0;
+  }
+}
+
 }  // namespace
 
 void setup() {
@@ -156,9 +235,22 @@ void setup() {
   nextUptimeLogMs = nowMs + Config::FOUNDATION_UPTIME_LOG_MS;
   nextAccelLogMs = nowMs + Config::MPU_ACCEL_LOG_MS;
   accelDiagnosticRunning = accelTestEnabled && mpu.error == Error::None;
+  if (latchTestEnabled && Config::ENABLE_IMPACT_DETECTION && mpu.error == Error::None &&
+      cpuConfigured && wifiOff && bluetoothOff) {
+    const Error error = motionSensor.enableMotion();
+    motionDiagnosticRunning = error == Error::None;
+    if (motionDiagnosticRunning) {
+      Serial0.printf("Motion diagnostic enabled | INT_ENABLE verified 0x40 | threshold raw %u | duration %u ms | suppression %lu ms\n",
+                     Config::MPU_MOTION_THRESHOLD_RAW, Config::IMPACT_DURATION_MS,
+                     static_cast<unsigned long>(Config::IMPACT_SUPPRESSION_MS));
+    } else {
+      stopMotionDiagnostic(errorText(error));
+    }
+  }
 }
 
 void loop() {
+  if (latchTestEnabled && motionDiagnosticRunning) serviceMotionDiagnostic(uptimeMs());
   if (uptimeTestEnabled) {
     const UptimeMs nowMs = uptimeMs();
     if (nowMs >= nextUptimeLogMs) {

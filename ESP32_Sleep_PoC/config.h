@@ -53,8 +53,14 @@ constexpr bool ENABLE_IMPACT_DETECTION = true;
 constexpr bool ENABLE_TILT_DETECTION = true;
 constexpr bool ENABLE_ENV_ACQUISITION = true;
 
-enum class TestMode { None, FoundationUptime, MpuAcceleration };
-constexpr TestMode TEST_MODE = TestMode::None;
+enum class TestMode { None, FoundationUptime, MpuAcceleration, MotionLatch };
+constexpr TestMode TEST_MODE = TestMode::MotionLatch;
+constexpr uint8_t MOTION_LATCH_TEST_THRESHOLD_RAW = 40;
+constexpr uint8_t MPU_MOTION_THRESHOLD_RAW =
+    TEST_MODE == TestMode::MotionLatch ? MOTION_LATCH_TEST_THRESHOLD_RAW : IMPACT_THRESHOLD_RAW;
+constexpr uint32_t LATCH_TEST_HOLD_MS = 250;
+constexpr uint32_t MOTION_RETRY_MS = 20;
+static_assert(LATCH_TEST_HOLD_MS > 0 && MOTION_RETRY_MS > 0, "Motion diagnostic intervals must be positive");
 constexpr uint32_t FOUNDATION_UPTIME_LOG_MS = 1000;
 constexpr uint32_t MPU_ACCEL_LOG_MS = 1000;
 constexpr uint32_t AWAKE_IDLE_YIELD_MS = 1;
@@ -79,7 +85,8 @@ static_assert(TILT_FILTER_SAMPLES % 2 == 1, "Tilt median window must be odd");
 static_assert(TILT_MIN_VALID_RATIO > 0 && TILT_MIN_VALID_RATIO <= 1.0f && TILT_MAX_VALID_RATIO >= 1.0f
                   && TILT_MIN_VALID_RATIO < TILT_MAX_VALID_RATIO,
               "Tilt magnitude bounds must include the stationary reference");
-static_assert(IMPACT_THRESHOLD_RAW > 0 && IMPACT_DURATION_MS > 0, "Impact threshold and duration must be positive");
+static_assert(IMPACT_THRESHOLD_RAW > 0 && MOTION_LATCH_TEST_THRESHOLD_RAW > 0 && IMPACT_DURATION_MS > 0,
+              "Impact thresholds and duration must be positive");
 static_assert(BUTTON_DEBOUNCE_MS > 0 && BUTTON_HOLD_MS >= BUTTON_DEBOUNCE_MS, "Invalid button timing");
 static_assert(ZEROING_TIME_MS > 0 && ZEROING_TIME_MS <= ARMING_DELAY_MS && ZEROING_SAMPLE_MS > 0
                   && ZEROING_SAMPLE_MS <= ZEROING_TIME_MS,
