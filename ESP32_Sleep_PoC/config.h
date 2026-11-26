@@ -54,7 +54,7 @@ constexpr bool ENABLE_TILT_DETECTION = true;
 constexpr bool ENABLE_ENV_ACQUISITION = true;
 
 enum class TestMode { None, FoundationUptime, MpuAcceleration, MotionLatch };
-constexpr TestMode TEST_MODE = TestMode::MotionLatch;
+constexpr TestMode TEST_MODE = TestMode::None;
 constexpr uint8_t MOTION_LATCH_TEST_THRESHOLD_RAW = 40;
 constexpr uint8_t MPU_MOTION_THRESHOLD_RAW =
     TEST_MODE == TestMode::MotionLatch ? MOTION_LATCH_TEST_THRESHOLD_RAW : IMPACT_THRESHOLD_RAW;
