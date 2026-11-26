@@ -2,10 +2,14 @@
 
 #include <esp_err.h>
 
-#include "Types.h"
+#include "SchedulerDeadlines.h"
+
+class SleepTrace;
 
 class PowerManager {
  public:
+  explicit constexpr PowerManager(SleepTrace *trace = nullptr) : trace_(trace) {}
+
   enum class Action { Reschedule, WaitAwake, Fault };
 
   struct Outcome {
@@ -25,12 +29,14 @@ class PowerManager {
     uint64_t sleepCallUs = 0;
   };
 
-  Outcome sleepUntil(UptimeMs deadlineMs, bool bootWake, bool motionWake, bool bootPressed);
+  Outcome sleepUntil(UptimeMs deadlineMs, bool bootWake, bool motionWake, bool bootPressed,
+                     const SchedulerDeadlines &deadlines = {});
   void resetStats() { stats_ = {}; }
   const Stats &stats() const { return stats_; }
 
  private:
   Stats stats_;
+  SleepTrace *trace_;
   bool bootWake_ = false;
   bool motionWake_ = false;
   bool gpioWake_ = false;

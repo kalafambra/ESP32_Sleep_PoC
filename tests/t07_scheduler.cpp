@@ -121,10 +121,15 @@ void concurrentWorkAndEarlyWake() {
   assert(io.calls == "M");
 
   const UptimeMs burst = start + envPeriod;
+  const auto beforeBurst = io.run(burst - tiltPeriod);
+  assert(beforeBurst.deadlineMs == burst);
+  assert(beforeBurst.deadlines.at[SchedulerDeadlines::Tilt] == burst);
+  assert(beforeBurst.deadlines.at[SchedulerDeadlines::Burst] == burst);
   io.motion = true;
   const auto waiting = io.run(burst);
   assert(io.calls == "MTEP");
   assert(waiting.deadlineMs == burst + Config::ENV_CONVERSION_CHECK_MS);
+  assert(waiting.deadlines.at[SchedulerDeadlines::Conversion] == waiting.deadlineMs);
   io.motion = true;
   assert(io.run(burst + 1).deadlineMs == waiting.deadlineMs);
   assert(io.calls == "M");
@@ -191,9 +196,13 @@ void disarmAndRearm() {
   assert(io.run(arming).deadlineMs < zeroing && io.calls == "A");
   io.pressed = false;
   io.run(arming + 1);
-  assert(io.run(arming + 1 + Config::BUTTON_DEBOUNCE_MS).deadlineMs == zeroing);
-  assert(io.run(zeroing).deadlineMs == zeroing + Config::ZEROING_SAMPLE_MS && io.calls == "ZR");
+  const auto countdown = io.run(arming + 1 + Config::BUTTON_DEBOUNCE_MS);
+  assert(countdown.deadlineMs == zeroing && countdown.deadlines.at[SchedulerDeadlines::Arming] == zeroing);
+  const auto sampling = io.run(zeroing);
+  assert(sampling.deadlineMs == zeroing + Config::ZEROING_SAMPLE_MS && io.calls == "ZR");
+  assert(sampling.deadlines.at[SchedulerDeadlines::ZeroingSample] == sampling.deadlineMs);
   const UptimeMs rearmed = zeroing + Config::ZEROING_TIME_MS;
+  assert(sampling.deadlines.at[SchedulerDeadlines::Zeroing] == rearmed);
   for (UptimeMs at = zeroing + Config::ZEROING_SAMPLE_MS; at < rearmed; at += Config::ZEROING_SAMPLE_MS) {
     io.run(at);
     assert(io.calls == "R");
@@ -220,6 +229,7 @@ void inputPreemptionAndIdleRecheck() {
   io.retryAt = check + Config::MOTION_RETRY_MS;
   auto idle = io.run(check);
   assert(idle.deadlineMs == io.retryAt && !idle.motionWakeEnabled && idle.bootWakeEnabled);
+  assert(idle.deadlines.at[SchedulerDeadlines::Motion] == idle.deadlineMs);
   io.motion = false;
   idle = io.run(io.retryAt);
   assert(io.calls == "M" && idle.motionWakeEnabled);
@@ -228,6 +238,7 @@ void inputPreemptionAndIdleRecheck() {
   io.pressed = true;
   idle = io.run(burst - qualify);
   assert(!idle.bootWakeEnabled && idle.motionWakeEnabled);
+  assert(idle.deadlines.at[SchedulerDeadlines::Boot] == burst - qualify + Config::BUTTON_DEBOUNCE_MS);
   io.motion = true;
   io.run(burst);
   assert(io.calls == "MD");

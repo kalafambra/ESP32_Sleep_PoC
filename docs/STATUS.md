@@ -1,5 +1,5 @@
 # Project status and handoff
-Revision 0.6 requirements baseline. Updated for the T08A requirements on 2026-11-26.
+Revision 0.6 requirements baseline. Updated for the T08A implementation on 2026-11-26.
 
 ## Current state
 - The [README](../README.md) summarizes the current board wiring, BOOT controls, and normal-mode monitoring features. Keep it aligned with user-visible changes.
@@ -54,7 +54,7 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 | T06 | MERGED | Three Arduino builds and fake-bus tests passed | Owner verified V08 cadence, identity and four-sample reports. Tilt cleared during a burst. Impact reports observed between bursts. | Merge `dff6a53` on `origin/master`. Impact inside a burst still to capture during T07 verification. |
 | T07 | MERGED | Normal and all five diagnostic ESP32 builds passed. Deterministic suites passed. | Owner trace confirms cadence, tilt transitions, an in-burst impact and BOOT disarm. Rearm reported by owner. | Merge `a81a0a7` on `origin/master`. In-burst disarm passed with fake time and I/O. The V11 board case remains open. |
 | T08 | MERGED | ESP32 build and deterministic tests passed | Owner completed feasible manual checks. Timer, BOOT and MPU wake, tilt, disarm/rearm, and awake comparison observed. Two impacts fall within scheduled BME bursts. | Merge `e5216d6`. Three timing-sensitive checks await fixture evidence or explicit owner waiver. Earlier invalid BME sample remains open for T09. |
-| T08A | NOT_STARTED | pending | pending | DATA-03 and V15 define the opt-in SleepTrace mode. Firmware implementation and tests belong on `feat/T08A-sleep-trace`. |
+| T08A | IMPLEMENTED_PENDING_VERIFICATION | All four ESP32 builds and deterministic suites passed | V15 owner board checks pending | [T08A handoff](#t08a-light-sleep-trace--2026-11-26--featt08a-sleep-trace). Merge requires V15 board evidence or an explicit waiver. |
 | T09 | NOT_STARTED | pending | pending | Investigate the [intermittent BME280 invalid sample](#intermittent-bme280-invalid-sample). |
 | T10 | NOT_STARTED | pending | pending | |
 
@@ -431,3 +431,44 @@ The owner completed the checks feasible by hand. The checklist below records the
 5. **Awake comparison.** Use the same mode and motion threshold as the sleep-enabled comparison run and set `ENABLE_SLEEP = false`. Verify the scheduler and sensor behavior against T07, sleep-call time and wake counts at zero, and the banner showing sleep off. Record actual results and restore the desired test settings.
 
 The traces cover steps 1 and 2 as described above, the conversion-wait portion of step 3, the rearm portion of step 4, and the step 5 awake comparison. The owner reports that coordinating a tap with a short BOOT hold is impractical by hand. Firmware tests cover keeping MPU wake enabled while BOOT wake is masked and cancelling an in-flight BME burst before publication. T08 merged in `e5216d6`. Board evidence remains open for MPU wake while BOOT is held, impact during UART output, and disarm during conversion. Those cases await fixture evidence or an explicit owner waiver.
+
+### T08A light-sleep trace · 2026-11-26 · `feat/T08A-sleep-trace`
+
+- Started with a clean tree at `fef332e`. The T08 merge `e5216d6` is an ancestor of the feature branch and `origin/master`. The existing raw impact threshold of 35 was retained. The IMP-02 text still lists 50.
+- `TestMode::SleepTrace` uses the normal monitoring path. The banner shows the selected mode and effective sleep setting. An entry line is queued only when the idle window fits its 8N1 UART transmission, a retry interval and the minimum sleep window. The power manager rechecks the original inputs and absolute deadline while UART drains. An announced attempt ends with a successful `WOKE` or a `SLEEP_ABORTED` reason.
+- Wake traces show asserted enabled pins on GPIO wakes and work due at the captured return time. An early timer return can list its still-future deadline reasons in `timer_work`. These are scheduler observations. Use the regular event and report lines for outcomes.
+
+#### Build and deterministic tests
+
+Arduino CLI verified Arduino-ESP32 `3.3.12`. All four builds passed for `esp32:esp32:esp32`. The installed core required sandbox approval. The tracked configuration remains `TestMode::None` with sleep enabled.
+
+| Mode | Sleep | Flash bytes | Global RAM bytes |
+|---|---|---:|---:|
+| None | On | 422728 | 38052 |
+| SleepTrace | On | 422980 | 38148 |
+| None | Off | 411724 | 38436 |
+| SleepTrace | Off | 411724 | 38436 |
+
+Zig 0.15.2 built the power, scheduler, environment and tilt suites as C++17 WASI with warnings treated as errors, with the T04 lifecycle assertions compiled alongside the tilt suite. All four suites passed under Node 24.22.1. The power and scheduler tests cover wake timestamps and durations, simultaneous work, both GPIO observations, unresolved GPIO wake, early timers, UART budget and deferral, input and deadline cancellation, and sleep rejection. `git diff --check` passed. No firmware upload or serial session was performed. V15 board evidence is the remaining merge gate.
+
+Use the CLI and config paths from the T04 handoff. For each comparison build, copy the sketch to a separate ignored `build-t08a-*` directory, change only `TEST_MODE` and `ENABLE_SLEEP` in that copy, and compile it to its own build path.
+
+```powershell
+& $cli compile --config-file $configPath --fqbn esp32:esp32:esp32 --build-path build-t08a-normal-on-final ESP32_Sleep_PoC
+```
+
+Use the T06 WASI runner and T06/T07 compile commands with `build-t08a-host` paths. The current power suite also links `SleepTrace.cpp`. Run all four WASM files using the Node runtime.
+
+```powershell
+New-Item -ItemType Directory -Force build-t08a-host | Out-Null
+$env:ZIG_GLOBAL_CACHE_DIR = Join-Path $PWD 'build-t08a-host/cache'
+& $zig c++ -target wasm32-wasi -std=c++17 -fno-exceptions -Wall -Wextra -Werror -I ESP32_Sleep_PoC -I tests/fake_sleep_idf ESP32_Sleep_PoC/PowerManager.cpp ESP32_Sleep_PoC/SleepTrace.cpp tests/t08_power.cpp -o build-t08a-host/t08_power.wasm
+```
+
+#### Owner board verification (V15)
+
+1. Select `TestMode::SleepTrace` and `ENABLE_SLEEP = true` with the recorded FQBN and wiring. Reset with BOOT released and capture the banner and disarmed idle entry at 115200 baud. Hold BOOT to arm. Look for a GPIO wake observing GPIO0 with BOOT work, then keep the board stationary through zeroing.
+2. Capture several armed reports. Look for timer wake work for a tilt check, a BME280 burst start and BME280 conversion checks. The first burst starts at arm +10 s, with four-sample reports on the 10 s phase. At a timer wake near a burst boundary, check for both tilt and burst work when both are due.
+3. Tap between reports to capture GPIO4 with motion work and the subsequent impact outcome. Hold BOOT through disarm and keep holding it for several seconds. Expect one `DISARMED` and no rapid repeated GPIO0 wakes. Release the button before issuing another command.
+4. Capture complete trace lines and continuous uptime. For each entry announcement, look for one wake or abort. Check that sleep-call duration fits between the entry and return timestamps, allowing for UART transmission and entry overhead. Awake duration runs from the previous successful return to the entry timestamp. UART traffic can shorten or skip short sleep windows, especially during zeroing. If an input cancels an attempt while the entry line drains, capture the abort and subsequent input handling.
+5. Repeat with `TestMode::None` and sleep on, then with `TestMode::SleepTrace` and sleep off. In both runs, confirm the banner settings and normal monitoring with zero sleep trace lines. Restore `TestMode::None` and sleep on when finished.

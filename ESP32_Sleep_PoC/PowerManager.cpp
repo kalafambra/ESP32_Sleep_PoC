@@ -5,6 +5,7 @@
 #include <esp_sleep.h>
 #include <esp_timer.h>
 
+#include "SleepTrace.h"
 #include "config.h"
 
 namespace {
@@ -22,11 +23,25 @@ esp_err_t setPinWake(gpio_num_t pin, gpio_int_type_t polarity, bool enabled, boo
 }  // namespace
 
 PowerManager::Outcome PowerManager::sleepUntil(UptimeMs deadlineMs, bool bootWake, bool motionWake,
-                                              bool bootPressed) {
+                                              bool bootPressed, const SchedulerDeadlines &deadlines) {
   const bool timed = deadlineMs != NO_DEADLINE_MS;
   const uint64_t deadlineUs = timed ? deadlineMs * 1000 : 0;
   const uint64_t nowUs = esp_timer_get_time();
+  const auto inputsPending = [=]() {
+    const bool pressed = gpio_get_level(bootPin) == 0;
+    return (pressed != bootPressed) || (bootWake && pressed) ||
+           (motionWake && gpio_get_level(motionPin) != 0);
+  };
+  const auto abortTrace = [this](const char *reason, esp_err_t error = ESP_OK) {
+    if (trace_ && trace_->pending()) trace_->abort(esp_timer_get_time(), reason, error);
+  };
+  if (trace_ && trace_->pending() && inputsPending()) {
+    abortTrace("wake input pending");
+    ++stats_.skips;
+    return {Action::Reschedule};
+  }
   if (timed && deadlineUs <= nowUs + Config::SLEEP_MIN_WINDOW_US) {
+    abortTrace("scheduler deadline too near");
     ++stats_.skips;
     return {deadlineUs <= nowUs ? Action::Reschedule : Action::WaitAwake};
   }
@@ -38,7 +53,10 @@ PowerManager::Outcome PowerManager::sleepUntil(UptimeMs deadlineMs, bool bootWak
     ++stats_.skips;
     return {Action::WaitAwake};
   }
-  if (result != ESP_OK) return {Action::Fault, "UART0 TX check", result};
+  if (result != ESP_OK) {
+    abortTrace("UART0 TX check failed", result);
+    return {Action::Fault, "UART0 TX check", result};
+  }
 
   result = setPinWake(bootPin, GPIO_INTR_LOW_LEVEL, bootWake, bootWake_);
   if (result != ESP_OK) return {Action::Fault, "BOOT wake configuration", result};
@@ -57,32 +75,39 @@ PowerManager::Outcome PowerManager::sleepUntil(UptimeMs deadlineMs, bool bootWak
   }
   if (!timed && !gpioWake) return {Action::Fault, "no sleep wake source", ESP_ERR_INVALID_STATE};
 
-  const auto inputsPending = [=]() {
-    const bool pressed = gpio_get_level(bootPin) == 0;
-    return (pressed != bootPressed) || (bootWake && pressed) ||
-           (motionWake && gpio_get_level(motionPin) != 0);
-  };
   if (inputsPending()) {
+    abortTrace("wake input pending");
     ++stats_.skips;
     return {Action::Reschedule};
   }
 
   const uint64_t timerStartUs = esp_timer_get_time();
+  if (trace_ && !trace_->pending()) {
+    // Resume this attempt on a later scheduler pass. UART polling is non-blocking.
+    if (!trace_->announce(timerStartUs, deadlineMs)) ++stats_.skips;
+    return {Action::WaitAwake};
+  }
   if (timed) {
     if (deadlineUs <= timerStartUs + Config::SLEEP_MIN_WINDOW_US) {
+      abortTrace("scheduler deadline too near");
       ++stats_.skips;
       return {deadlineUs <= timerStartUs ? Action::Reschedule : Action::WaitAwake};
     }
     result = esp_sleep_enable_timer_wakeup(deadlineUs - timerStartUs);
-    if (result != ESP_OK) return {Action::Fault, "timer wake configuration", result};
+    if (result != ESP_OK) {
+      abortTrace("timer wake configuration failed", result);
+      return {Action::Fault, "timer wake configuration", result};
+    }
     timerWake_ = true;
   }
 
   // A GPIO asserted after the last check is still a hardware wake source.
   const uint64_t beforeUs = esp_timer_get_time();
   result = esp_light_sleep_start();
-  const uint64_t elapsedUs = esp_timer_get_time() - beforeUs;
+  const uint64_t returnUs = esp_timer_get_time();
+  const uint64_t elapsedUs = returnUs - beforeUs;
   if (result != ESP_OK) {
+    abortTrace(result == ESP_ERR_SLEEP_REJECT ? "light sleep rejected" : "light sleep entry failed", result);
     ++stats_.entryErrors;
     if (result == ESP_ERR_SLEEP_REJECT && inputsPending()) {
       consecutiveEntryErrors_ = 0;
@@ -96,16 +121,25 @@ PowerManager::Outcome PowerManager::sleepUntil(UptimeMs deadlineMs, bool bootWak
 
   consecutiveEntryErrors_ = 0;
   stats_.sleepCallUs += elapsedUs;
-  switch (esp_sleep_get_wakeup_cause()) {
+  const auto cause = esp_sleep_get_wakeup_cause();
+  const bool observeInputs = trace_ || cause == ESP_SLEEP_WAKEUP_GPIO;
+  const bool pressed = observeInputs && (bootWake || trace_) && gpio_get_level(bootPin) == 0;
+  const bool bootObserved = bootWake && pressed;
+  const bool motionObserved = observeInputs && motionWake && gpio_get_level(motionPin) != 0;
+  switch (cause) {
     case ESP_SLEEP_WAKEUP_TIMER: ++stats_.timerWakes; break;
     case ESP_SLEEP_WAKEUP_GPIO:
       ++stats_.gpioWakes;
       // The original ESP32 provides a GPIO wake category, so sample the
       // enabled pins before the scheduler acknowledges or qualifies them.
-      if (bootWake && gpio_get_level(bootPin) == 0) ++stats_.bootObserved;
-      if (motionWake && gpio_get_level(motionPin) != 0) ++stats_.motionObserved;
+      if (bootObserved) ++stats_.bootObserved;
+      if (motionObserved) ++stats_.motionObserved;
       break;
     default: ++stats_.otherWakes; break;
+  }
+  if (trace_) {
+    trace_->woke(returnUs, elapsedUs, cause, bootObserved, motionObserved, pressed != bootPressed,
+                 deadlineMs, deadlines);
   }
   return {Action::Reschedule};
 }
