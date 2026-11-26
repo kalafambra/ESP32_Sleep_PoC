@@ -33,8 +33,9 @@ arduino-cli compile --fqbn esp32:esp32:esp32 --build-path build ESP32_Sleep_PoC
 
 The Arduino IDE equivalent is to install `esp32` by Espressif Systems version 3.3.12 in Boards Manager, open `ESP32_Sleep_PoC/ESP32_Sleep_PoC.ino`, select **ESP32 Dev Module**, and click **Verify**. The sketch requests 80 MHz at runtime and prints the actual CPU frequency.
 
-1. With power disconnected, check 3.3 V, common ground, SDA GPIO21, SCL GPIO22, MPU AD0 to GND and MPU INT GPIO4. Keep BOOT released through reset.
+1. With power disconnected, check 3.3 V, common ground, SDA GPIO21, SCL GPIO22, and MPU INT GPIO4. Leave the MPU AD0 header unconnected on the installed breakout with its onboard 4.7 kΩ pull-down. For replacement breakouts, follow HW-03. Keep BOOT released through reset.
 2. Select the board's actual port in Arduino IDE, upload the normal build, and open Serial Monitor at 115200 baud. Power-cycle and capture the startup banner, `Mode normal`, `WHO_AM_I 0x68`, the readback line and the timestamped `DISARMED` line. Expect matching actual/expected values for `0x6C=0x07`, `0x6B=0x08`, `0x38=0x00`, `0x23=0x00`, `0x6A=0x00`, `0x1A=0x01`, `0x19=0x00`, `0x1C=0x11`, `0x1F=0x32`, `0x20=0x01`, `0x37=0x20`, followed by `MPU6050 ready`. Normal mode should emit the startup report once. Capture the full readback line and any `MPU_INIT_ERROR` if the mismatch recurs.
+   For V01, capture `MPU address 0x68` from the same line as `WHO_AM_I 0x68`.
 3. Set `Config::TEST_MODE` in `config.h` to `TestMode::MpuAcceleration`, then upload the diagnostic. Expect `Mode MPU acceleration test` and one timestamped `MPU_ACCEL` line per second. Rest the module flat and stationary and record XYZ and magnitude from several samples. Expect stable magnitude around 1 g. Turn the module upside down and check that the same dominant axis reverses sign. Rest the module on its side and check that the newly vertical axis becomes dominant. Magnitude should return to around 1 g after each move. Record the actual orientation and readings.
 4. If feasible, power off, disconnect the MPU module and boot the same diagnostic. Expect `MPU_INIT_ERROR` at the identity read, a `DISARMED` line and no sample output. Power off, reconnect the module and boot again to confirm successful initialization. Restore `Config::TEST_MODE` to `TestMode::None` after testing.
 
@@ -55,6 +56,7 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 | T10 | NOT_STARTED | pending | pending | |
 
 ## Approved decisions / open risks
+- HW-03 permits the installed MPU6050 breakout to use its onboard 4.7 kΩ AD0 pull-down with the header unconnected. The configured I²C address is `0x68`. Replacement breakouts without a confirmed pull-down use an AD0-to-GND jumper.
 - 10 s environmental start-to-start interval; 1 s tilt checks, 5 s validation/persistence; prior 1 s tilt latency superseded. Interpretation: persistence begins at first filtered qualifying check, typical physical step 6–7 s. Owner has not specified hard 5 s end-to-end deadline.
 - 30° threshold, any gravity-relative inclination excluding yaw; 3° hysteresis and three-sample median retained from prior proposed design.
 - Motion threshold raw 50, duration 1 ms, 100 ms suppression, stability bounds, fault retry count and timing tolerances are initial engineering defaults pending experiments. Verify MPU register semantics on actual module.
@@ -150,6 +152,8 @@ For a focused suppression check, first complete the latch probe. Confirm two del
 
 ## Verification evidence index
 Add entries keyed V01..V14 with date, firmware commit/config, procedure, expected, observed evidence, pass/fail/pending/waived. Do not store fabricated serial logs as actual observations. V14 remains deferred.
+
+- **V01 / V06–V07 AD0 wiring update, reported 2026-11-26.** The owner confirmed the breakout has a 4.7 kΩ pull-down and reported correct MPU6050 operation after disconnecting the AD0 jumper. The firmware build, startup address/identity and register capture, and latch/acknowledgement observations for this wiring were unreported. This change updates documentation only. No new build or board test was run by Codex.
 
 - **V01 build and T01 board observations, 2026-11-25.** Uncommitted T01 on base `3f15c02`. Normal mode and `FoundationUptime` both compiled for ESP32 Dev Module on Arduino-ESP32 3.3.12. The owner observed serial-reported I2C initialization, 80 MHz actual CPU frequency, a timestamped `DISARMED` line and advancing diagnostic uptime. After deliberate reset, the owner observed uptime restart near zero and advance as expected. The T01 board check passed. Sensor identity and missing-sensor arming checks are deferred to their respective implementation tasks.
 - **V01 T02 build and MPU board check, 2026-11-25.** Uncommitted T02 on base `78d6897`. All three variants compiled for ESP32 Dev Module on Arduino-ESP32 3.3.12. Identity, register readbacks, approximate 1 g stationary magnitude and rotation/sign are pending board evidence. Missing-MPU startup handling is also pending a board check if feasible. The arming gate is covered by later lifecycle work.

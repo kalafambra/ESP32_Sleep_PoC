@@ -1,5 +1,5 @@
 # ESP32 Sleep Mode PoC — requirements and architecture
-Revision: 0.4 | Baseline specification | 2026-11-25
+Revision: 0.5 | Baseline specification | 2026-11-26
 
 ## 1. Purpose and boundaries
 Demonstrate low-power environmental acquisition and asynchronous physical-event monitoring. The ESP32 should sleep whenever no work is pending, while the MPU6050 independently detects short acceleration transients such as a finger tap on the enclosure. Tilt checks must detect slow changes as well as sudden sustained inclination. The intended product may run for days; the initial PoC is exercised for minutes. Power is an optimization objective, not a pass/fail threshold. The earlier 5 mA at 5 V figure is a benchmark only; analysis focuses on ESP32, MPU6050, BME280, not USB-UART, regulator or breakout overhead. Precise current testing is deferred. No microphone, audio, radio, network, persistent data logging, wall clock, deep sleep or ULP in v1. No claim of perfect impact detection.
@@ -9,7 +9,7 @@ Demonstrate low-power environmental acquisition and asynchronous physical-event 
 |---|---|
 | HW-01 | Original ESP32-WROOM-32D carrier board, Arduino framework, C++; owner uses Arduino IDE and VS Code/Codex. Record actual board selection/FQBN and Arduino-ESP32 core in STATUS; do not guess installed versions. Prefer Arduino CLI for reproducible compile, if installed. |
 | HW-02 | BME280 and MPU6050 share 3.3 V and GND, SDA GPIO21, SCL GPIO22. Initially 400 kHz I2C; configurable, fall back to 100 kHz only as an explicit diagnostic/config change. |
-| HW-03 | MPU6050 AD0 to GND, address 0x68; INT to GPIO4 (not GPIO17); XDA/XCL unused. Verify identity and interrupt behavior on actual module. |
+| HW-03 | Hold MPU6050 AD0 low for 7-bit I²C address `0x68`. On the installed breakout, leave the AD0 header unconnected and use its onboard 4.7 kΩ pull-down. On replacement breakouts without a confirmed onboard pull-down, connect AD0 to GND. Connect INT to GPIO4 and leave XDA/XCL unused. Verify the MPU6050 bus address, identity, and interrupt behavior on the installed module. |
 | HW-04 | BME280 auto-detect 0x76/0x77; verify chip ID 0x60 (do not accept BMP280 as BME280). |
 | HW-05 | BOOT GPIO0 active LOW; GPIO2 status LED active HIGH or -1 to disable. UART TX GPIO1/RX GPIO3, 115200 baud. Never drive BOOT as output. Holding BOOT during reset may enter bootloader; runtime button operation only. |
 | HW-06 | INMP441 not used; disconnect its supply/module for meaningful power measurements. No changes to agreed pinout without owner approval. |
@@ -20,7 +20,7 @@ Use descriptive units in identifiers; validate ranges and relationships. Default
 | Setting | Default | Notes |
 |---|---:|---|
 | I2C_SDA_PIN / I2C_SCL_PIN | 21 / 22 | Fixed wiring |
-| MPU_INT_PIN / MPU_ADDRESS | 4 / 0x68 | Fixed wiring |
+| MPU_INT_PIN / MPU_ADDRESS | 4 / 0x68 | INT on GPIO4. AD0 held low as specified in HW-03. |
 | BOOT_PIN / STATUS_LED_PIN | 0 / 2 | LED may be -1 |
 | I2C_CLOCK_HZ | 400000 | Configurable |
 | SERIAL_BAUD | 115200 | Configurable |
@@ -97,7 +97,7 @@ Suggested contracts: `MotionSensor` begin/configure, readAccel, enableMotion, re
 ## 6. Verification matrix
 | ID | Expected verification | Method |
 |---|---|---|
-| V01 | Reproducible build, correct IDs/addresses, missing sensor prevents full arm | Compile + board |
+| V01 | Reproduce the build and verify sensor bus addresses and identities. With the HW-03 wiring, verify MPU6050 communication at `0x68`, `WHO_AM_I = 0x68`, and matching startup register readbacks. Verify that an unavailable required sensor prevents full arming. | Compile + board |
 | V02 | Short BOOT ignored; long press one action; held/release/repress works | Fake-time tests + board |
 | V03 | 10 s countdown includes final stable 2 s reference; unstable retry; reset disarmed | Fake-time + board |
 | V04 | Reference near 0° (suggest within 2°); slow tilt any direction, yaw excluded | Pure logic + board |
