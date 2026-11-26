@@ -40,7 +40,7 @@ constexpr uint8_t TILT_FILTER_SAMPLES = 3;
 constexpr float TILT_MIN_VALID_RATIO = 0.85f;
 constexpr float TILT_MAX_VALID_RATIO = 1.15f;
 
-constexpr uint8_t IMPACT_THRESHOLD_RAW = 50;
+constexpr uint8_t IMPACT_THRESHOLD_RAW = 25;
 constexpr uint8_t IMPACT_DURATION_MS = 1;
 constexpr uint32_t IMPACT_SUPPRESSION_MS = 100;
 
@@ -72,6 +72,7 @@ static_assert(LATCH_TEST_HOLD_MS > 0 && MOTION_RETRY_MS > 0, "Motion diagnostic 
 constexpr uint32_t FOUNDATION_UPTIME_LOG_MS = 1000;
 constexpr uint32_t MPU_ACCEL_LOG_MS = 1000;
 constexpr uint32_t AWAKE_IDLE_YIELD_MS = 1;
+constexpr uint32_t AWAKE_INPUT_POLL_MS = 20;  // Fallback if a GPIO notification is missed.
 
 constexpr bool validOversampling(uint8_t multiplier) {
   return multiplier == 1 || multiplier == 2 || multiplier == 4 || multiplier == 8 || multiplier == 16;
@@ -112,7 +113,8 @@ static_assert(ZEROING_MIN_MAGNITUDE_G > 0 && ZEROING_MIN_MAGNITUDE_G < ZEROING_M
                   ZEROING_MIN_SAMPLE_PERCENT <= 100,
               "Invalid zeroing stability limits");
 static_assert(SENSOR_FAILURE_LIMIT > 0, "Sensor failure limit must be positive");
-static_assert(FOUNDATION_UPTIME_LOG_MS > 0 && AWAKE_IDLE_YIELD_MS > 0, "Foundation intervals must be positive");
+static_assert(FOUNDATION_UPTIME_LOG_MS > 0 && AWAKE_IDLE_YIELD_MS > 0 && AWAKE_INPUT_POLL_MS > 0,
+              "Awake timing intervals must be positive");
 static_assert(MPU_REGISTER_READY_WAIT_MS > 0 && MPU_WAKE_SETTLE_MS > 0 &&
                   MPU_ACCEL_SETTLE_MS > 0 && MPU_ACCEL_LOG_MS > 0,
               "MPU intervals must be positive");

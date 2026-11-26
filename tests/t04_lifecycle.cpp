@@ -90,7 +90,7 @@ constexpr bool completesCountdownAndStartsFreshOnRearm() {
       || controller.tick(end - 1, false, true) != Event::None
       || controller.tick(end, false, true) != Event::ReferenceWindowElapsed) return false;
 
-  controller.completeArm();
+  controller.completeArm(end, {}, false, false);
   return controller.state() == State::Armed
       && controller.nextDeadline() == NO_DEADLINE_MS
       && controller.tick(end + 1, true, true) == Event::Disarmed
