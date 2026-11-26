@@ -4,6 +4,8 @@
 #include <esp_wifi.h>
 #include <math.h>
 
+#include "Button.h"
+#include "DeviceController.h"
 #include "MotionSensor.h"
 #include "Uptime.h"
 #include "config.h"
@@ -14,13 +16,17 @@ constexpr bool statusLedEnabled = Config::ENABLE_STATUS_LED && Config::STATUS_LE
 constexpr bool uptimeTestEnabled = Config::TEST_MODE == Config::TestMode::FoundationUptime;
 constexpr bool accelTestEnabled = Config::TEST_MODE == Config::TestMode::MpuAcceleration;
 constexpr bool latchTestEnabled = Config::TEST_MODE == Config::TestMode::MotionLatch;
+constexpr bool lifecycleTestEnabled = Config::TEST_MODE == Config::TestMode::ButtonLifecycle;
 MotionSensor motionSensor(Wire);
+Button bootButton;
+DeviceController lifecycle;
+const char *armingBlockReason = nullptr;
 UptimeMs nextUptimeLogMs = 0;
 UptimeMs nextAccelLogMs = 0;
 bool accelDiagnosticRunning = false;
 uint8_t consecutiveAccelErrors = 0;
 bool motionDiagnosticRunning = false;
-bool latchProbePending = true;
+bool latchProbePending = latchTestEnabled;
 bool holdingLatch = false;
 bool stayedHigh = true;
 UptimeMs holdStartedMs = 0;
@@ -83,12 +89,13 @@ void printMpuStartup(bool wireReady, const MotionSensor::Initialization &mpu) {
 
 void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool bluetoothOff,
                         const MotionSensor::Initialization &mpu) {
-  Serial0.printf("ESP32 Sleep PoC | T03 MPU6050 motion interrupt | Arduino-ESP32 %s\n", ESP_ARDUINO_VERSION_STR);
+  Serial0.printf("ESP32 Sleep PoC | T04 BOOT lifecycle | Arduino-ESP32 %s\n", ESP_ARDUINO_VERSION_STR);
   const char *mode = uptimeTestEnabled ? "foundation uptime test" : "normal";
   if (accelTestEnabled) {
     mode = "MPU acceleration test";
   }
   if (latchTestEnabled) mode = "MPU motion latch test";
+  if (lifecycleTestEnabled) mode = "BOOT lifecycle test";
   Serial0.printf("Mode %s | CPU target %lu MHz, actual %lu MHz | UART %lu baud (TX GPIO%d, RX GPIO%d)\n",
                  mode,
                  static_cast<unsigned long>(Config::CPU_FREQ_MHZ), static_cast<unsigned long>(getCpuFrequencyMhz()),
@@ -105,7 +112,16 @@ void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool b
   Serial0.printf("Feature settings | Impact %s | Tilt %s | Environment %s | Sleep %s | Status LED %s\n",
                  onOff(Config::ENABLE_IMPACT_DETECTION), onOff(Config::ENABLE_TILT_DETECTION),
                  onOff(Config::ENABLE_ENV_ACQUISITION), onOff(Config::ENABLE_SLEEP), onOff(statusLedEnabled));
-  Serial0.println("T03 operation | Integrated monitoring and light sleep unavailable | CPU awake");
+  if (lifecycleTestEnabled) {
+    Serial0.printf("Lifecycle diagnostic | debounce %lu ms | qualified hold %lu ms | countdown %lu ms | reference timing hook %lu ms\n",
+                   static_cast<unsigned long>(Config::BUTTON_DEBOUNCE_MS),
+                   static_cast<unsigned long>(Config::BUTTON_HOLD_MS),
+                   static_cast<unsigned long>(Config::ARMING_DELAY_MS),
+                   static_cast<unsigned long>(Config::ZEROING_TIME_MS));
+    Serial0.println("Reference validation, tilt, environmental acquisition and light sleep pending | diagnostic ARMED is motion-only when enabled");
+  } else {
+    Serial0.println("Integrated monitoring, reference validation and light sleep pending | CPU awake");
+  }
   Serial0.printf("Radios | Wi-Fi %s | Bluetooth %s\n", wifiOff ? "off" : "shutdown failed",
                  bluetoothOff ? "off" : "shutdown failed");
 
@@ -141,15 +157,19 @@ void logAcceleration(UptimeMs nowMs) {
                  a.x, a.y, a.z, magnitudeG);
 }
 
-void stopMotionDiagnostic(const char *reason) {
+void stopMotion(const char *reason) {
   motionDiagnosticRunning = false;
   const Error cleanup = motionSensor.disableMotion();
   printTimestamp(uptimeMs());
-  Serial0.printf("MOTION_FAULT | %s | disable/clear: %s | DISARMED | reset after inspection\n",
-                 reason, errorText(cleanup));
+  if (lifecycleTestEnabled) {
+    lifecycle.enterFault();
+    setStatusLed(false);
+  }
+  Serial0.printf("MOTION_FAULT | %s | disable/clear: %s | %s | reset after inspection\n",
+                 reason, errorText(cleanup), lifecycleTestEnabled ? "FAULT" : "DISARMED");
 }
 
-void serviceMotionDiagnostic(UptimeMs nowMs) {
+void serviceMotion(UptimeMs nowMs) {
   if (nowMs < nextMotionCheckMs) return;
   const bool high = motionSensor.interruptAsserted();
   if (!holdingLatch && !high) {
@@ -166,7 +186,7 @@ void serviceMotionDiagnostic(UptimeMs nowMs) {
       Serial0.printf("LATCH_HOLD | GPIO4 before accel=1 after accel=%u | read=%s\n",
                      stayedHigh, errorText(sample.error));
       if (!sample.valid()) {
-        stopMotionDiagnostic(errorText(sample.error));
+        stopMotion(errorText(sample.error));
         return;
       }
     }
@@ -175,7 +195,7 @@ void serviceMotionDiagnostic(UptimeMs nowMs) {
     const auto sample = motionSensor.readAccel();
     stayedHigh = stayedHigh && motionSensor.interruptAsserted();
     if (!sample.valid()) {
-      stopMotionDiagnostic(errorText(sample.error));
+      stopMotion(errorText(sample.error));
       return;
     }
   }
@@ -188,7 +208,7 @@ void serviceMotionDiagnostic(UptimeMs nowMs) {
                    nowMs - holdStartedMs, stayedHigh, verified, afterAck, errorText(event.error));
     holdingLatch = latchProbePending = false;
     if (!stayedHigh || !verified) {
-      stopMotionDiagnostic("latch probe failed");
+      stopMotion("latch probe failed");
       return;
     }
   }
@@ -203,11 +223,64 @@ void serviceMotionDiagnostic(UptimeMs nowMs) {
     Serial0.printf("MOTION_CHECK | ack=%s motion bit=%u GPIO4=%u | attempt %u/%u\n",
                    errorText(event.error), verified, afterAck, motionFailures + 1, Config::SENSOR_FAILURE_LIMIT);
     if (++motionFailures >= Config::SENSOR_FAILURE_LIMIT) {
-      stopMotionDiagnostic("repeated status or latch failure");
+      stopMotion("repeated status or latch failure");
     }
     nextMotionCheckMs = nowMs + Config::MOTION_RETRY_MS;
   } else {
     motionFailures = 0;
+  }
+}
+
+void serviceLifecycle(UptimeMs nowMs) {
+  const bool pressed = bootButton.tick(nowMs, digitalRead(Config::BOOT_PIN) == LOW);
+  const bool wasArmed = lifecycle.state() == DeviceController::State::Armed;
+  switch (lifecycle.tick(nowMs, pressed, armingBlockReason == nullptr)) {
+    case DeviceController::Event::None:
+      return;
+    case DeviceController::Event::ArmingStarted:
+      setStatusLed(true);
+      printTimestamp(nowMs);
+      Serial0.println("ARMING_STARTED | lifecycle diagnostic");
+      return;
+    case DeviceController::Event::ReferenceWindowStarted:
+      printTimestamp(nowMs);
+      Serial0.println("ZEROING_STARTED | diagnostic timing hook; reference validation pending");
+      return;
+    case DeviceController::Event::ReferenceWindowElapsed: {
+      // This opt-in diagnostic exercises the transition without creating a reference.
+      printTimestamp(nowMs);
+      Serial0.println("ZEROING_SKIPPED | diagnostic timing hook complete");
+      if (Config::ENABLE_IMPACT_DETECTION) {
+        const Error error = motionSensor.enableMotion();
+        if (error != Error::None) {
+          stopMotion(errorText(error));
+          return;
+        }
+        motionFailures = 0;
+        nextMotionCheckMs = 0;
+      }
+      lifecycle.completeArm();
+      setStatusLed(false);
+      printTimestamp(uptimeMs());
+      Serial0.printf("ARMED | lifecycle diagnostic | motion %s\n", onOff(Config::ENABLE_IMPACT_DETECTION));
+      return;
+    }
+    case DeviceController::Event::Disarmed:
+      setStatusLed(false);
+      if (wasArmed && Config::ENABLE_IMPACT_DETECTION) {
+        const Error error = motionSensor.disableMotion();
+        if (error != Error::None) {
+          stopMotion(errorText(error));
+          return;
+        }
+      }
+      printTimestamp(uptimeMs());
+      Serial0.printf("DISARMED | %s\n", wasArmed ? "lifecycle diagnostic" : "arming cancelled");
+      return;
+    case DeviceController::Event::ArmRefused:
+      printTimestamp(nowMs);
+      Serial0.printf("ARMING_REFUSED | FAULT | %s | reset after inspection\n", armingBlockReason);
+      return;
   }
 }
 
@@ -232,6 +305,14 @@ void setup() {
   const auto mpu = wireReady ? motionSensor.begin() : MotionSensor::Initialization{};
   printStartupBanner(cpuConfigured, wireReady, wifiOff, bluetoothOff, mpu);
   const UptimeMs nowMs = uptimeMs();
+  if (lifecycleTestEnabled) {
+    bootButton = Button(digitalRead(Config::BOOT_PIN) == LOW, nowMs);
+    if (!cpuConfigured || !wifiOff || !bluetoothOff) {
+      armingBlockReason = "platform startup failed";
+    } else if (Config::ENABLE_IMPACT_DETECTION && mpu.error != Error::None) {
+      armingBlockReason = errorText(mpu.error);
+    }
+  }
   nextUptimeLogMs = nowMs + Config::FOUNDATION_UPTIME_LOG_MS;
   nextAccelLogMs = nowMs + Config::MPU_ACCEL_LOG_MS;
   accelDiagnosticRunning = accelTestEnabled && mpu.error == Error::None;
@@ -244,13 +325,21 @@ void setup() {
                      Config::MPU_MOTION_THRESHOLD_RAW, Config::IMPACT_DURATION_MS,
                      static_cast<unsigned long>(Config::IMPACT_SUPPRESSION_MS));
     } else {
-      stopMotionDiagnostic(errorText(error));
+      stopMotion(errorText(error));
     }
   }
 }
 
 void loop() {
-  if (latchTestEnabled && motionDiagnosticRunning) serviceMotionDiagnostic(uptimeMs());
+  if (lifecycleTestEnabled) {
+    serviceLifecycle(uptimeMs());
+    if (Config::ENABLE_IMPACT_DETECTION && lifecycle.state() == DeviceController::State::Armed) {
+      serviceMotion(uptimeMs());
+    }
+    yield();
+    return;
+  }
+  if (latchTestEnabled && motionDiagnosticRunning) serviceMotion(uptimeMs());
   if (uptimeTestEnabled) {
     const UptimeMs nowMs = uptimeMs();
     if (nowMs >= nextUptimeLogMs) {

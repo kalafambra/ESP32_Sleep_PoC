@@ -1,11 +1,11 @@
 # Project status and handoff
-Revision 0.4 requirements baseline. Updated for T03 on 2026-11-26.
+Revision 0.4 requirements baseline. Updated for T04 on 2026-11-26.
 
 ## Current state
-- The foundation initializes UART0, CPU frequency, shared I2C and GPIOs. The firmware starts DISARMED, reports startup faults and stays awake. T02 initializes the MPU6050 for continuous acceleration and reports identity and register readback at startup. T03 configures and verifies the motion detector with its interrupt masked at startup. Only the MotionLatch diagnostic enables it and polls GPIO4 while awake. The optional acceleration diagnostic reports signed XYZ and magnitude once per second.
+- The foundation initializes UART0, CPU frequency, shared I2C and GPIOs. The firmware starts DISARMED, reports startup faults and stays awake. T02 initializes the MPU6050 for continuous acceleration and reports identity and register readback at startup. T03 configures and verifies the motion detector with its interrupt masked at startup. The MotionLatch diagnostic enables it at startup. The opt-in T04 ButtonLifecycle diagnostic enables it only on diagnostic arming and disables and clears it on disarm. The optional acceleration diagnostic reports signed XYZ and magnitude once per second.
 - Selected architecture: explicit ESP32 light sleep, continuous MPU6050 accelerometer with latched GPIO4 motion interrupt, 1 s tilt checks with 5 s persistence, BME280 four forced samples every 10 s.
 - The owner completed the T01 board check. T01 is merged in `78d6897`, the starting base for T02. The owner reported a passing T02 board retest with appropriate acceleration magnitude readings after the initialization-order change.
-- Hardware wiring change required relative to original: move MPU INT GPIO17 -> GPIO4. Owner approved; physical connection not confirmed.
+- The owner verified latched motion on GPIO4 after rewiring for T03.
 
 ## Environment
 | Item | Recorded value |
@@ -17,7 +17,7 @@ Revision 0.4 requirements baseline. Updated for T03 on 2026-11-26.
 | OS / toolchain | Windows 25H2 (build 26200), Xtensa ESP GCC package `esp-x32@2601` |
 | Dependency versions | `Wire` and ESP-IDF APIs bundled with Arduino-ESP32 3.3.12. No separate sensor library for T02. |
 | Compile command | See [Build and board checks](#build-and-board-checks). |
-| Test command | The Arduino compile runs the T02 signed-conversion `static_assert` checks. |
+| Test command | The Arduino compile runs the T02 signed-conversion assertions. The T04 diagnostic build procedure below also compiles the fake-time assertions. |
 | Upload/serial procedure | See [Build and board checks](#build-and-board-checks). Owner operates hardware. |
 | Sketch path | `ESP32_Sleep_PoC/ESP32_Sleep_PoC.ino` |
 
@@ -34,7 +34,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32 --build-path build ESP32_Sleep_PoC
 The Arduino IDE equivalent is to install `esp32` by Espressif Systems version 3.3.12 in Boards Manager, open `ESP32_Sleep_PoC/ESP32_Sleep_PoC.ino`, select **ESP32 Dev Module**, and click **Verify**. The sketch requests 80 MHz at runtime and prints the actual CPU frequency.
 
 1. With power disconnected, check 3.3 V, common ground, SDA GPIO21, SCL GPIO22, MPU AD0 to GND and MPU INT GPIO4. Keep BOOT released through reset.
-2. Select the board's actual port in Arduino IDE, upload the normal build, and open Serial Monitor at 115200 baud. Power-cycle and capture the T03 banner, `Mode normal`, `WHO_AM_I 0x68`, the readback line and the timestamped `DISARMED` line. Expect matching actual/expected values for `0x6C=0x07`, `0x6B=0x08`, `0x38=0x00`, `0x23=0x00`, `0x6A=0x00`, `0x1A=0x01`, `0x19=0x00`, `0x1C=0x11`, `0x1F=0x32`, `0x20=0x01`, `0x37=0x20`, followed by `MPU6050 ready`. Normal mode should emit the startup report once. Capture the full readback line and any `MPU_INIT_ERROR` if the mismatch recurs.
+2. Select the board's actual port in Arduino IDE, upload the normal build, and open Serial Monitor at 115200 baud. Power-cycle and capture the startup banner, `Mode normal`, `WHO_AM_I 0x68`, the readback line and the timestamped `DISARMED` line. Expect matching actual/expected values for `0x6C=0x07`, `0x6B=0x08`, `0x38=0x00`, `0x23=0x00`, `0x6A=0x00`, `0x1A=0x01`, `0x19=0x00`, `0x1C=0x11`, `0x1F=0x32`, `0x20=0x01`, `0x37=0x20`, followed by `MPU6050 ready`. Normal mode should emit the startup report once. Capture the full readback line and any `MPU_INIT_ERROR` if the mismatch recurs.
 3. Set `Config::TEST_MODE` in `config.h` to `TestMode::MpuAcceleration`, then upload the diagnostic. Expect `Mode MPU acceleration test` and one timestamped `MPU_ACCEL` line per second. Rest the module flat and stationary and record XYZ and magnitude from several samples. Expect stable magnitude around 1 g. Turn the module upside down and check that the same dominant axis reverses sign. Rest the module on its side and check that the newly vertical axis becomes dominant. Magnitude should return to around 1 g after each move. Record the actual orientation and readings.
 4. If feasible, power off, disconnect the MPU module and boot the same diagnostic. Expect `MPU_INIT_ERROR` at the identity read, a `DISARMED` line and no sample output. Power off, reconnect the module and boot again to confirm successful initialization. Restore `Config::TEST_MODE` to `TestMode::None` after testing.
 
@@ -45,8 +45,8 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 |---|---|---|---|---|
 | T01 | MERGED | normal and uptime diagnostic passed | owner board check passed | Merge `78d6897` |
 | T02 | MERGED | updated normal and both diagnostics passed | owner retest passed | Tip 171f429 present on master. Optional missing-module check unreported. |
-| T03 | VERIFIED | raw 40 MotionLatch and raw 50 normal rebuilds passed | V06 and awake V07 passed at raw 50 | Raw 40 sensitivity trial pending. Restore normal mode before owner merge. |
-| T04 | NOT_STARTED | pending | pending | |
+| T03 | MERGED | raw 40 MotionLatch and raw 50 normal rebuilds passed | V06 and awake V07 passed at raw 50 | Tip `592b99f` on `master` with normal mode selected. Raw 40 sensitivity trial pending. |
+| T04 | IMPLEMENTED_PENDING_VERIFICATION | normal and ButtonLifecycle builds passed, eight fake-time assertions passed | V02/V03 board checks pending | Reference timing hook only. |
 | T05 | NOT_STARTED | pending | pending | |
 | T06 | NOT_STARTED | pending | pending | |
 | T07 | NOT_STARTED | pending | pending | |
@@ -161,3 +161,38 @@ Add entries keyed V01..V14 with date, firmware commit/config, procedure, expecte
 - **T03 sensitivity trial build.** Arduino CLI passed both builds for `esp32:esp32:esp32` with the same CLI and config as above. The MotionLatch build used the workspace sketch and `--build-path build-t03-MotionLatch/firmware`. The normal build used `build-t03-threshold-normal/ESP32_Sleep_PoC`, a copy with `TestMode::None` selected, and `--build-path build-t03-None/firmware`. Flash usage was 395852 and 393704 bytes respectively. The workspace still selects MotionLatch for the owner retest. Restore None before merge.
 - **T03 rapid-tap follow-up, 2026-11-26.** The owner reported no impact detections during rapid repeated tapping and could not reproduce suppression. The flashed threshold and a trace for this attempt were unspecified. The suppression counter requires a second acknowledged motion notification within the window after the last reported event. Multiple taps can share one latch, and a tap that produces no motion status gives the suppression logic nothing to count. Suppression remains unverified on the board. The passing raw 50 latch and awake tap observations above satisfy the T03 hardware merge gate.
 - **T03 suppression retest, 2026-11-26.** The owner observed `IMPACT_SUPPRESSED` on the board with a temporary 1000 ms window. Exact event timestamps and the threshold used were unreported. The workspace is back to the 100 ms setting and `TestMode::None`.
+
+### T04 BOOT lifecycle · 2026-11-26 · `feat/T04-button-lifecycle`
+
+- Started with a clean tree at `592b99f`, the T03 tip on `master`. T03 latch and awake motion verification is recorded above.
+- `Button` accepts one command after 20 ms of debounce followed by 300 ms of continuously observed LOW. A release observed during qualification restarts the hold. Stable release permits a new command. A button held at runtime initialization must be released before it can issue a command. `wakeMasked()` and `nextDeadline()` expose the BOOT state and poll or qualification deadline for later sleep integration.
+- `DeviceController` starts DISARMED, sets the reference timing deadline at press acceptance +8 s, and requests diagnostic arming after a full 2 s timing window. A late start of that window extends the countdown. A qualified press cancels arming or disarms, and takes priority if it coincides with a countdown deadline. The optional LED is solid during ARMING and off in DISARMED, ARMED and FAULT.
+- `TestMode::ButtonLifecycle` reports `ZEROING_SKIPPED` when the timing hook completes. Diagnostic arming enables MPU motion, clears stale status and resets motion counters through the T03 driver. Disarming masks and clears motion. Required MPU startup failures refuse arming when impact is enabled. Unrecoverable motion errors stop the diagnostic in FAULT and require a deliberate reset. Normal mode remains selected in the workspace. Real reference validation and full monitoring are pending.
+- Both Arduino CLI builds passed with `esp32:esp32:esp32` and Arduino-ESP32 3.3.12. Normal used 393696 bytes of flash and 37380 bytes of global RAM. ButtonLifecycle used 396796 bytes of flash and 37460 bytes of global RAM. The diagnostic compile produced `t04_lifecycle.cpp.o` with all eight compile-time fake-time assertions evaluated. They cover bounce, the 319/320 ms boundary, held and repeated presses, release after startup, countdown, cancellation, late deadlines, faults and reset, with timestamps above 32-bit range.
+
+Run from the repository root to reproduce the two builds and fake-time checks. The diagnostic build uses an ignored copy of the current sketch.
+
+```powershell
+$cli = 'D:/ArduinoIDE/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe'
+$configPath = 'C:/Users/przemek/.arduinoIDE/arduino-cli.yaml'
+& $cli compile --config-file $configPath --fqbn esp32:esp32:esp32 --build-path build-t04-normal ESP32_Sleep_PoC
+
+$stage = 'build-t04-diagnostic/ESP32_Sleep_PoC'
+New-Item -ItemType Directory -Force -Path $stage | Out-Null
+Copy-Item -Path ESP32_Sleep_PoC/* -Destination $stage
+Copy-Item -LiteralPath tests/t04_lifecycle.cpp -Destination $stage
+$stagedConfig = Join-Path $stage config.h
+$content = Get-Content -LiteralPath $stagedConfig -Raw
+$content.Replace('TEST_MODE = TestMode::None;', 'TEST_MODE = TestMode::ButtonLifecycle;') |
+    Set-Content -LiteralPath $stagedConfig -Encoding ascii -NoNewline
+& $cli compile --config-file $configPath --fqbn esp32:esp32:esp32 --build-path build-t04-diagnostic/firmware $stage
+```
+
+Owner board checks for V02/V03 and diagnostic motion, all pending.
+
+1. Verify wiring as above. With BOOT released, upload the ButtonLifecycle build using the staged sketch or select `TestMode::ButtonLifecycle` in Arduino IDE. Open Serial Monitor at 115200 baud and reset. Capture `Mode BOOT lifecycle test` and `DISARMED` with the optional LED off.
+2. Tap BOOT briefly and confirm no lifecycle event. Hold BOOT through the whole countdown and confirm exactly one `ARMING_STARTED`, then `ZEROING_STARTED` around +8 s and `ZEROING_SKIPPED` and diagnostic `ARMED` around +10 s. The optional LED is solid during the countdown and off when armed. Keep holding briefly after `ARMED` and confirm the hold produces no second command.
+3. Release BOOT, then hold again to disarm once. Repeat and cancel one attempt before `ZEROING_STARTED` and another during the final window. In each case, expect `DISARMED | arming cancelled` and no later arm from that attempt. Complete a fresh countdown, then reset while diagnostic ARMED with BOOT released and confirm a fresh DISARMED startup.
+4. With impact enabled, try a deliberate known-detectable tap while disarmed, during countdown, and after diagnostic arming. Expect impact reports only while diagnostic ARMED. With the board still, disarm, rearm, and check that no stale impact is reported. The first detected tap in the new session should show `count=1`. If feasible, power off, disconnect the MPU, and boot the diagnostic again. Expect `MPU_INIT_ERROR` and `ARMING_REFUSED | FAULT` on a qualified press. Restore the sensor with power off.
+
+T04 awaits owner confirmation of BOOT behavior before merge. The diagnostic remains awake and the reference timing hook supplies no gravity reference.

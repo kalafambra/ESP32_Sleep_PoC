@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 using UptimeMs = uint64_t;
+constexpr UptimeMs NO_DEADLINE_MS = UINT64_MAX;
 
 struct Vec3 {
   float x = 0.0f;
