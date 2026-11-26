@@ -1,4 +1,4 @@
-# Implementation tasks — Rev 0.4
+# Implementation tasks — Rev 0.6
 
 This is an ordered backlog, not an instruction to implement everything in one session. Each task is one reviewable feature branch and normally one Codex chat. Dependencies refer to previously merged work; the owner may split a task further if debugging becomes large. Read only the selected task and its dependency status. All tasks must preserve prior working behavior and compile on the recorded target. No automatic merge. For each task, update `docs/STATUS.md` with actual results; use pending for physical tests until owner confirms. Tests described here are expected behaviors, not evidence. Configuration values and requirement IDs refer to REQUIREMENTS.md.
 
@@ -13,7 +13,8 @@ This is an ordered backlog, not an instruction to implement everything in one se
 | T06 | feat/T06-bme | BME280 non-blocking acquisition | T05 |
 | T07 | feat/T07-scheduler | Deadline-driven integration, awake baseline | T06 |
 | T08 | feat/T08-light-sleep | Timer + GPIO wake integration | T07 |
-| T09 | feat/T09-reporting | Serial reports, diagnostics and fault hardening | T08 |
+| T08A | feat/T08A-sleep-trace | Opt-in light-sleep trace test mode | T08 |
+| T09 | feat/T09-reporting | Serial reports, diagnostics and fault hardening | T08A |
 | T10 | test/T10-integration | Hardware regression and baseline release | T09 |
 
 Use temporary test modes, one selected mode at a time via compile-time config. Keep tests in the repo, not throwaway sketches with diverging drivers. Before T07, standalone test mode may use short cooperative tick/poll timing with CPU awake; no claim of power optimization yet. T01 records how to select each mode. Intermediate builds may expose only supported functionality and must clearly say which stage they are in. Do not label them full ARMED monitoring until integration.
@@ -101,11 +102,22 @@ Scope:
 
 Merge gate: compile; actual board test mandatory unless explicitly waived: timer wake advances uptime without reset, MPU motion wakes from actual light sleep, BOOT wakes/disarms, held BOOT does not cause rapid repeated wakes, sleep persists between deadlines, impacts during BME wait are serviced, sleep disable gives previous functionality. Capture serial evidence and counters; no claim of electrical current. If board can't sleep, preserve working T07 and diagnose on branch.
 
+## T08A — Light-sleep trace test mode
+
+Use branch `feat/T08A-sleep-trace` after T08. Requirements DATA-03 and PWR-02 apply, with verification V15.
+
+- Add `TestMode::SleepTrace` to `config.h`, keep `TestMode::None` as the checked-in default, and identify the selected mode and sleep state in the banner. Reuse the normal lifecycle, scheduler, sensors and power path. Respect `ENABLE_SLEEP`.
+- Preserve the scheduler's timer deadline reasons and collect due work at wake. Capture the ESP-IDF cause and enabled GPIO observations on successful sleep return before normal handling changes the inputs. Emit the DATA-03 lines with the existing uptime format. Budget UART drain time and recheck the current deadline and inputs before entry, keeping the existing wake configuration, fault handling and absolute schedule.
+- Build normal mode and SleepTrace with sleep enabled and disabled on `esp32:esp32:esp32` using Arduino-ESP32 `3.3.12`. Use fake time and I/O to check wake timestamps and durations, simultaneous due reasons, both GPIO observations, unresolved GPIO wake, UART deferral, entry cancellation and sleep rejection. Verify one entry announcement per attempt and one wake line per successful sleep return. Re-run the scheduler and power suites.
+- On the board, capture a BOOT wake from disarmed idle and timer wakes for tilt, a BME280 burst start and a conversion check. While armed, tap to capture a GPIO4 wake and motion event. Verify one disarm during a held BOOT press, complete serial lines, continuous uptime, and four-sample reports on the 10 s phase. Check normal mode and SleepTrace with sleep disabled for zero sleep trace lines. UART transmission may shorten or skip the shortest sleep windows, especially during zeroing.
+
+Merge gate requires successful builds, deterministic regression tests and owner board evidence for V15 or an explicit documented waiver. Record actual results in STATUS.
+
 ## T09 — Serial diagnostics and fault hardening
-Branch: `feat/T09-reporting` | Depends: T08 | Requirements: DATA-01/02, SYS-01..04, V13
+Branch: `feat/T09-reporting` | Depends: T08A | Requirements: DATA-01/02/03, SYS-01..04, V13
 
 Scope:
-- Complete human-readable event messages, 10 s successful BME report with required fields, recognition uptime, state, counts and errors, sleep stats with accurate units and denominator. No per-timer wake prints. Include wake/missed deadline/late processing, suppressed impacts, BME samples and failures. Report stale/unavailable tilt explicitly, disabled features explicitly; no stale data presented as valid.
+- Complete human-readable event messages, 10 s successful BME report with required fields, recognition uptime, state, counts and errors, sleep stats with accurate units and denominator. Restrict per-wake and pre-sleep lines to SleepTrace as specified in DATA-03. Include wake/missed deadline/late processing, suppressed impacts, BME samples and failures. Report stale/unavailable tilt explicitly, disabled features explicitly; no stale data presented as valid.
 - Review error paths throughout drivers, sensor availability/arm refusal, bounded I2C errors and conversion timeout, sleep error, latch failure, no automatic rearm, rate-limited error logging. Add fault/recovery tests and validate safe fault/disarmed state. No unrelated refactor or new data storage/communication.
 - Investigate the [intermittent BME280 invalid sample observed during T08](STATUS.md#intermittent-bme280-invalid-sample) under ENV-03/04 and SYS-04. Add failure-only diagnostics for the exact rejection reason, conversion index, time since trigger, available raw sample bytes and status/configuration readback, and the most recent BOOT wake observation with its timestamp. Keep capture bounded and avoid per-wake output.
 - Use fake time to inject short BOOT activity before and at BME conversion deadlines. Verify no early reads, extra conversions, partial reports, or schedule drift. If board reproduction is needed, use a timed trigger and compare sleep enabled with the awake baseline. Use the captured evidence to guide any validation or wake-related fix and add a regression for the identified failure. Retain four fresh conversions per successful burst and the existing failure recovery policy.
@@ -113,10 +125,10 @@ Scope:
 Merge gate: compile and deterministic tests; owner confirms readable reports and immediate events, no silent failures, no UART truncation or sleep-induced flood; simulate failure using safe diagnostic injection rather than live rewiring if possible. Record actual results and remaining issues.
 
 ## T10 — Integrated validation and release baseline
-Branch: `test/T10-integration` | Depends: T09 | Requirements: V01..V13 (V14 deferred)
+Branch: `test/T10-integration` | Depends: T09 | Requirements: V01..V13 and V15 (V14 deferred)
 
 Scope:
-- Review full firmware against requirement IDs and task history. Run reproducible build and all available pure tests. Prepare manual hardware checklist mapping V01..V13 to step, expected result, actual evidence and pass/fail/pending. Perform owner-led stationary 10 min and approximately 30 min integrated test where practical; inspect schedules, stale events, uptime, unexpected resets and sleep utilization.
+- Review full firmware against requirement IDs and task history. Run reproducible build and all available pure tests. Prepare a manual hardware checklist mapping V01..V13 and V15 to steps, expected results, actual evidence and pass/fail/pending. Include a short V15 SleepTrace run. Where practical, perform owner-led stationary 10 min and approximately 30 min integrated runs in `TestMode::None`. Inspect schedules, stale events, uptime, unexpected resets and sleep utilization.
 - Manual tap tests around 500 ms apart, tap during environmental burst, slow/fast tilt and recovery, button while asleep, disarm/rearm and power cycle. Record observed detections/misses/false alarms; no mandatory numerical tap ratio. No exact current gate. Do not claim tests performed by Codex unless actually executed with evidence.
 - Fix small integration issues in scope; large defects get separate `fix/...` tasks/branches and explicit tracking before release. Record final versions and known limitations, update STATUS with release readiness.
 

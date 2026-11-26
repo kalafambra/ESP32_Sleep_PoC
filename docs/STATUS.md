@@ -1,5 +1,5 @@
 # Project status and handoff
-Revision 0.5 requirements baseline. Updated for T08 on 2026-11-26.
+Revision 0.6 requirements baseline. Updated for the T08A requirements on 2026-11-26.
 
 ## Current state
 - The [README](../README.md) summarizes the current board wiring, BOOT controls, and normal-mode monitoring features. Keep it aligned with user-visible changes.
@@ -53,7 +53,8 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 | T05 | IMPLEMENTED_PENDING_VERIFICATION | both Arduino builds and nine lifecycle assertions passed; native tilt suite compiled, execution blocked | Owner completed the hardware merge-gate checks, including slow tilt with impact disabled and transient rejection | Windows Application Control blocked the native test executable. |
 | T06 | MERGED | Three Arduino builds and fake-bus tests passed | Owner verified V08 cadence, identity and four-sample reports. Tilt cleared during a burst. Impact reports observed between bursts. | Merge `dff6a53` on `origin/master`. Impact inside a burst still to capture during T07 verification. |
 | T07 | MERGED | Normal and all five diagnostic ESP32 builds passed. Deterministic suites passed. | Owner trace confirms cadence, tilt transitions, an in-burst impact and BOOT disarm. Rearm reported by owner. | Merge `a81a0a7` on `origin/master`. In-burst disarm passed with fake time and I/O. The V11 board case remains open. |
-| T08 | IMPLEMENTED_PENDING_VERIFICATION | ESP32 build and deterministic tests passed | Owner completed feasible manual checks. Timer, BOOT and MPU wake, tilt, disarm/rearm, and awake comparison observed. Two impacts fall within scheduled BME bursts. | Timing-sensitive checks await fixture evidence or explicit owner waiver. Earlier invalid BME sample remains open for T09. |
+| T08 | MERGED | ESP32 build and deterministic tests passed | Owner completed feasible manual checks. Timer, BOOT and MPU wake, tilt, disarm/rearm, and awake comparison observed. Two impacts fall within scheduled BME bursts. | Merge `e5216d6`. Three timing-sensitive checks await fixture evidence or explicit owner waiver. Earlier invalid BME sample remains open for T09. |
+| T08A | NOT_STARTED | pending | pending | DATA-03 and V15 define the opt-in SleepTrace mode. Firmware implementation and tests belong on `feat/T08A-sleep-trace`. |
 | T09 | NOT_STARTED | pending | pending | Investigate the [intermittent BME280 invalid sample](#intermittent-bme280-invalid-sample). |
 | T10 | NOT_STARTED | pending | pending | |
 
@@ -415,9 +416,9 @@ Use the T06 WASI runner and the T06/T07 regression commands with `build-t08-host
 
 #### Intermittent BME280 invalid sample
 
-Open for [T09](TASKS.md#t09--serial-diagnostics-and-fault-hardening) after T08. The initial trace contains one recovered failure. Its timing relative to BOOT and the reason for rejecting the sample remain unconfirmed. Candidate causes include a valid reading matching a raw value the driver rejects unconditionally, or bad data received after a wake. T09 will collect failure-only evidence, exercise BOOT timing with fake time, and use a timed board trial if needed to decide what to fix.
+Open for [T09](TASKS.md#t09--serial-diagnostics-and-fault-hardening) after T08A. The initial trace contains one recovered failure. Its timing relative to BOOT and the reason for rejecting the sample remain unconfirmed. Candidate causes include a valid reading matching a raw value the driver rejects unconditionally, or bad data received after a wake. T09 will collect failure-only evidence, exercise BOOT timing with fake time, and use a timed board trial if needed to decide what to fix.
 
-Continue T08 board verification. Save the surrounding timestamped reports and sleep counters if the error recurs, along with any observed BOOT activity and whether sleep was enabled. Reproducing this particular failure by hand is unnecessary. If failures recur and interfere with cadence, cause a fault, or prevent a required board check, review T08 merge readiness with the new evidence.
+Save the surrounding timestamped reports and sleep counters if the error recurs, along with any observed BOOT activity and whether sleep was enabled. Reproducing this particular failure by hand is unnecessary. Use any recurrence that affects cadence, causes a fault, or blocks a board check as evidence for the T09 investigation.
 
 #### Remaining owner board verification
 
@@ -429,4 +430,4 @@ The owner completed the checks feasible by hand. The checklist below records the
 4. **Disarm during a pending conversion and rearm (V11).** Time the start of a BOOT hold shortly before a predicted burst so it qualifies after `ENV_BURST_STARTED` and before the report would normally appear. Use the measured burst duration to time the press. Save the burst marker and `DISARMED`, and check that no report follows for the cancelled burst. Release, rearm at a new stationary orientation and check for a fresh reference, reset session counts, no stale impact, and the first burst at the new arm time +10 s.
 5. **Awake comparison.** Use the same mode and motion threshold as the sleep-enabled comparison run and set `ENABLE_SLEEP = false`. Verify the scheduler and sensor behavior against T07, sleep-call time and wake counts at zero, and the banner showing sleep off. Record actual results and restore the desired test settings.
 
-The traces cover steps 1 and 2 as described above, the conversion-wait portion of step 3, the rearm portion of step 4, and the step 5 awake comparison. The owner reports that coordinating a tap with a short BOOT hold is impractical by hand. Firmware tests cover keeping MPU wake enabled while BOOT wake is masked and cancelling an in-flight BME burst before publication. Board evidence is still open for MPU wake while BOOT is held, impact during UART output, and disarm during conversion. T08 remains pending fixture evidence or an explicit owner waiver for these cases.
+The traces cover steps 1 and 2 as described above, the conversion-wait portion of step 3, the rearm portion of step 4, and the step 5 awake comparison. The owner reports that coordinating a tap with a short BOOT hold is impractical by hand. Firmware tests cover keeping MPU wake enabled while BOOT wake is masked and cancelling an in-flight BME burst before publication. T08 merged in `e5216d6`. Board evidence remains open for MPU wake while BOOT is held, impact during UART output, and disarm during conversion. Those cases await fixture evidence or an explicit owner waiver.

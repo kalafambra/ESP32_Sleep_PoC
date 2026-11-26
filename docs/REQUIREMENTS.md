@@ -1,5 +1,5 @@
 # ESP32 Sleep Mode PoC — requirements and architecture
-Revision: 0.5 | Baseline specification | 2026-11-26
+Revision: 0.6 | Baseline specification | 2026-11-26
 
 ## 1. Purpose and boundaries
 Demonstrate low-power environmental acquisition and asynchronous physical-event monitoring. The ESP32 should sleep whenever no work is pending, while the MPU6050 independently detects short acceleration transients such as a finger tap on the enclosure. Tilt checks must detect slow changes as well as sudden sustained inclination. The intended product may run for days; the initial PoC is exercised for minutes. Power is an optimization objective, not a pass/fail threshold. The earlier 5 mA at 5 V figure is a benchmark only; analysis focuses on ESP32, MPU6050, BME280, not USB-UART, regulator or breakout overhead. Precise current testing is deferred. No microphone, audio, radio, network, persistent data logging, wall clock, deep sleep or ULP in v1. No claim of perfect impact detection.
@@ -44,6 +44,7 @@ Use descriptive units in identifiers; validate ranges and relationships. Default
 | ARMING_DELAY_MS | 10000 | Includes final zeroing window |
 | ZEROING_TIME_MS | 2000 | Stationary reference window |
 | ZEROING_SAMPLE_MS | 10 | ~100 Hz |
+| TEST_MODE | `TestMode::None` | Select `TestMode::SleepTrace` and enable sleep for the opt-in trace in DATA-03. |
 | ENABLE_SLEEP / ENABLE_STATUS_LED | true / true | No LED when armed; optional disable |
 | ENABLE_IMPACT_DETECTION / ENABLE_TILT_DETECTION / ENABLE_ENV_ACQUISITION | true / true / true | Test isolation; report disabled features |
 
@@ -77,7 +78,7 @@ Proposed zeroing stability defaults (engineering choices, adjust after hardware 
 
 ### PWR/SYS — scheduling, faults, time and diagnostics
 - PWR-01: Baseline explicit `esp_light_sleep_start()` and timer wake to earliest pending absolute deadline. GPIO4 HIGH and GPIO0 LOW independently configured with gpio_wakeup_enable + esp_sleep_enable_gpio_wakeup. Use verified core/IDF APIs, check return codes and avoid sleep with due work or asserted unhandled pin. Do not use delay() as substitute for hardware sleep. Disable radios; do not enable radio or modem services.
-- PWR-02: One cooperative scheduler, no armed busy waits or repeated catch-up loops. Service motion, BOOT, due tilt, BME state, reports, then compute next deadline; recheck pending work before sleep. A timer wake is not necessarily a tilt check. Early wakes do not move schedules. Keep short bounded I2C operations, no concurrent bus owners. Flush queued UART TX before sleeping or verify documented buffering behavior; no loss of messages, no per-wake logging. Avoid sleeping in active bus transaction.
+- PWR-02: One cooperative scheduler, no armed busy waits or repeated catch-up loops. Service motion, BOOT, due tilt, BME state, reports, then compute next deadline; recheck pending work before sleep. A timer wake is not necessarily a tilt check. Early wakes do not move schedules. Keep short bounded I2C operations, no concurrent bus owners. Flush queued UART TX before sleeping or verify documented buffering behavior; no loss of messages. Per-wake and pre-sleep logging is restricted to the opt-in test mode defined in DATA-03. Avoid sleeping in active bus transaction.
 - SYS-01: Use 64-bit monotonic `esp_timer_get_time()` as uptime/deadline source across light sleep; store integer us or ms consistently. No wall clock, no 32-bit wrap failure. Timestamp outputs as HH:MM:SS.mmm with hours not wrapping at 24 h. Maintain sleep counters and elapsed time across sleep. Measure elapsed sleep-call time (includes entry/exit overhead); label approximate sleep utilization, not electrical current. Per-armed-session statistics reset at arm; uptime remains global.
 - SYS-02: Diagnostics: timer/GPIO/other wake calls, motion/BOOT source observations (may overlap), sleep-call errors/skips, cumulative sleep-call and awake durations, armed utilization, impact/suppressed count, tilt transitions, BME sample/burst/errors, missed deadlines. Do not double count wake calls if two pins assert. Distinguish awake event handling from actual GPIO wake. Track peak lateness/processing duration if useful. No precise current acceptance gate.
 - SYS-03: Enabled-feature switches for staged tests; report disabled features, never claim full functionality when isolated. No Wi-Fi/BLE, flash logging, deep sleep or ULP in baseline.
@@ -86,6 +87,18 @@ Proposed zeroing stability defaults (engineering choices, adjust after hardware 
 ### DATA — serial contract
 - DATA-01: Boot banner lists firmware/core if available, sensor identities, pinout, config and feature switches, state. Serial 115200. Immediate lines: `[HH:MM:SS.mmm] ARMING_STARTED`, `ZEROING_STARTED`, `ZEROING_OK` or `ZEROING_RETRY`, `ARMED`, `DISARMED`, `IMPACT_DETECTED count=N`, `TILT_DETECTED angle=X`, `TILT_CLEARED angle=X`, fault/error as applicable. Human readable; no exact timestamp of physical tap asserted. Do not require a rigid binary protocol.
 - DATA-02: Periodic report includes uptime, armed duration, report number, temperature °C, RH %, pressure hPa, samples averaged, tilt angle or stale/unavailable, state/threshold, transitions, impact count/last recognized time, sleep mode, sleep-call duration, awake duration, approximate sleep utilization, wake stats, failures and missed deadlines. No unmeasured current estimate presented as measured value. Do not flood per periodic tilt check.
+- DATA-03 — Light-sleep trace. `TestMode::SleepTrace` uses the normal monitoring and sleep path, including BOOT control and enabled sensors. The startup banner identifies the mode and whether sleep is enabled. `ENABLE_SLEEP` controls light sleep. Trace lines are emitted only when this mode and sleep are both enabled. Each line starts with the existing uptime format followed by `[DEBUG]`.
+  - On each successful return from explicit light sleep, capture the wake timestamp and emit one `WOKE` line with the sleep mode, ESP-IDF wake cause, elapsed sleep-call time in milliseconds, and the functional reason or work pending at wake. Sleep-call time includes entry and exit overhead. Identify the scheduled timer work for timer wakes and any other work already due at wake. Distinguish BME280 burst start from conversion check, MPU6050 tilt check from motion service, and BOOT handling from arming or zeroing work. List simultaneous reasons and report when none can be identified. For GPIO wakes, list all enabled wake pins observed asserted on return, or report the GPIO source as unresolved if none are observed. Pending work describes what the scheduler has to check. Normal event lines report the outcome.
+  - Before entering light sleep, emit one `SLEEP_ENTERING` line with the sleep mode and elapsed awake time in milliseconds from the previous successful wake, or from boot for the first interval, to the line's timestamp. The line's own transmission follows that timestamp. Allow UART to drain cooperatively, budget transmission time against the available idle window, and recheck deadlines and wake pins before entry. Pending work takes priority. If an announced attempt is cancelled or rejected, emit one `SLEEP_ABORTED` line with the reason. UART deferrals within the same attempt produce a single entry announcement. A `WOKE` line requires a successful sleep return.
+
+  Illustrative trace output
+
+  ```text
+  [00:00:22.000] [DEBUG] SLEEP_ENTERING mode=light-sleep awake_ms=2.415
+  [00:00:22.060] [DEBUG] WOKE mode=light-sleep cause=timer sleep_call_ms=53.887 work=BME280 conversion check
+  [00:00:22.073] [DEBUG] SLEEP_ENTERING mode=light-sleep awake_ms=12.694
+  [00:00:22.092] [DEBUG] WOKE mode=light-sleep cause=GPIO sleep_call_ms=12.018 observed=GPIO4 work=MPU6050 motion service
+  ```
 
 ## 5. Architecture and interfaces
 Selected: ESP32 explicit light sleep + autonomous continuous MPU6050 hardware motion interrupt + periodic host tilt checks + non-blocking BME280 conversions. At 1 s tilt period deep sleep may become competitive; measure later, not assumed inferior. Typical chip-level idle baseline around 1.3 mA at 3.3 V (0.8 ESP + 0.5 MPU, BME negligible), illustrative only. No validated average current or 5 V input prediction. Main CPU active frequency 80 MHz initially, evaluate later.
@@ -111,6 +124,7 @@ Suggested contracts: `MotionSensor` begin/configure, readAccel, enableMotion, re
 | V12 | Stationary 10 min, integrated ~30 min operation, inspect false events, resets, timing, stats and sleep utilization | Board; exploratory false-event observation |
 | V13 | Invalid reads/timeouts/missed deadlines handled, fault not healthy armed, recovery deliberate | Mock tests + safe board simulation |
 | V14 | Measure current and compare sleep modes | Deferred, not a v1 acceptance gate |
+| V15 | Verify DATA-03 wake causes, pending work, timestamps, awake and sleep-call durations, and entry cancellation. Capture complete trace lines during BOOT, timer and MPU6050 wakes while maintaining monitoring cadence. Expect zero sleep trace lines in normal mode and in SleepTrace with sleep disabled. | ESP32 builds, fake-time and I/O tests, owner board checks |
 
 ## 7. References and open engineering risks
 - ESP-IDF sleep: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/sleep_modes.html
