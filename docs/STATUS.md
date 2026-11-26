@@ -2,6 +2,7 @@
 Revision 0.5 requirements baseline. Updated for T08 on 2026-11-26.
 
 ## Current state
+- The [README](../README.md) summarizes the current board wiring, BOOT controls, and normal-mode monitoring features. Keep it aligned with user-visible changes.
 - The firmware initializes UART0, CPU frequency, shared I2C and GPIOs, reports startup status and starts DISARMED. T02 initializes the MPU6050 for continuous acceleration and reports identity and register readback. The motion interrupt stays masked until arming in normal mode. The MotionLatch diagnostic enables it at startup. The acceleration diagnostic reports signed XYZ and magnitude once per second.
 - Selected architecture: explicit ESP32 light sleep, continuous MPU6050 accelerometer with latched GPIO4 motion interrupt, 1 s tilt checks with 5 s persistence, BME280 four forced samples every 10 s.
 - The owner completed the T01 board check. T01 is merged in `78d6897`, the starting base for T02. The owner reported a passing T02 board retest with appropriate acceleration magnitude readings after the initialization-order change.
