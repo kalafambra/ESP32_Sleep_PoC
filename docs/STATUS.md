@@ -1,5 +1,5 @@
 # Project status and handoff
-Revision 0.5 requirements baseline. Updated for T05 on 2026-11-26.
+Revision 0.5 requirements baseline. Updated for T06 on 2026-11-26.
 
 ## Current state
 - The foundation initializes UART0, CPU frequency, shared I2C and GPIOs. The firmware starts DISARMED, reports startup faults and stays awake. T02 initializes the MPU6050 for continuous acceleration and reports identity and register readback at startup. T03 configures and verifies the motion detector with its interrupt masked at startup. The MotionLatch diagnostic enables it at startup. The opt-in T04 ButtonLifecycle diagnostic enables it only on diagnostic arming and disables and clears it on disarm. The optional acceleration diagnostic reports signed XYZ and magnitude once per second.
@@ -7,6 +7,7 @@ Revision 0.5 requirements baseline. Updated for T05 on 2026-11-26.
 - The owner completed the T01 board check. T01 is merged in `78d6897`, the starting base for T02. The owner reported a passing T02 board retest with appropriate acceleration magnitude readings after the initialization-order change.
 - The owner verified latched motion on GPIO4 after rewiring for T03.
 - The opt-in ButtonLifecycle diagnostic now collects a stationary gravity reference and runs scheduled tilt checks alongside motion. Default mode starts DISARMED and stays awake.
+- The opt-in Environment diagnostic runs four-sample BME280 bursts on a 10 s schedule alongside motion and tilt. Select `TestMode::Environment` to exercise it.
 
 ## Environment
 | Item | Recorded value |
@@ -16,9 +17,9 @@ Revision 0.5 requirements baseline. Updated for T05 on 2026-11-26.
 | Arduino-ESP32 core version | `esp32:esp32@3.3.12` |
 | Board selection/FQBN | ESP32 Dev Module (`esp32:esp32:esp32`) for ESP32-WROOM-32D. Exact carrier model awaits owner confirmation. |
 | OS / toolchain | Windows 25H2 (build 26200), Xtensa ESP GCC package `esp-x32@2601` |
-| Dependency versions | `Wire` and ESP-IDF APIs bundled with Arduino-ESP32 3.3.12. No separate sensor library for T02. |
+| Dependency versions | `Wire` and ESP-IDF APIs bundled with Arduino-ESP32 3.3.12. The MPU6050 and BME280 drivers use register I/O and require no separate sensor libraries. |
 | Compile command | See [Build and board checks](#build-and-board-checks). |
-| Test command | Arduino builds evaluate the T02 signed-conversion assertions. See the T05 handoff for the lifecycle assertions and native tilt tests. |
+| Test command | Arduino builds evaluate the T02 signed-conversion assertions. See the T05 and T06 handoffs for fake-time lifecycle, tilt and BME280 checks. |
 | Upload/serial procedure | See [Build and board checks](#build-and-board-checks). Owner operates hardware. |
 | Sketch path | `ESP32_Sleep_PoC/ESP32_Sleep_PoC.ino` |
 
@@ -50,7 +51,7 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 | T03 | MERGED | raw 40 MotionLatch and raw 50 normal rebuilds passed | V06 and awake V07 passed at raw 50 | Tip `592b99f` on `master` with normal mode selected. Raw 40 sensitivity trial pending. |
 | T04 | MERGED | normal and ButtonLifecycle builds passed, eight fake-time assertions passed | Owner confirmed short press, held press, disarm and both cancellation paths. Countdown and reset-to-DISARMED observed. | Merge `6c32bdb`. |
 | T05 | IMPLEMENTED_PENDING_VERIFICATION | both Arduino builds and nine lifecycle assertions passed; native tilt suite compiled, execution blocked | Owner completed the hardware merge-gate checks, including slow tilt with impact disabled and transient rejection | Windows Application Control blocked the native test executable. |
-| T06 | NOT_STARTED | pending | pending | |
+| T06 | IMPLEMENTED_PENDING_VERIFICATION | Three Arduino builds and fake-bus tests passed | V08 and concurrent motion/tilt board check pending | Diagnostic mode only. |
 | T07 | NOT_STARTED | pending | pending | |
 | T08 | NOT_STARTED | pending | pending | |
 | T09 | NOT_STARTED | pending | pending | |
@@ -256,3 +257,48 @@ Board checklist for reproduction and remaining trials.
 5. With motion enabled, verify a known-detectable tap still prints `IMPACT_DETECTED` during tilt monitoring. Disarm and rearm at a different stable orientation, then hold that orientation and verify the new session starts normal. Restore `TestMode::None` after board testing.
 
 The remaining T05 merge gate item is execution of the native suite. The board traces leave exact physical step timing, other orientations and yaw, cancellation during a retry, and rearming at a different orientation unverified. Sustained linear acceleration can still look like inclination. The diagnostic remains awake, with periodic environmental reports and explicit sleep deferred.
+
+### T06 BME280 acquisition · 2026-11-26 · `feat/T06-bme`
+
+- Started from a clean tree at `3ced900`. The T05 tip is present on `master` and its board checks are recorded above.
+- `EnvironmentSensor` probes `0x76` then `0x77`, accepts only chip ID `0x60`, resets and configures the chip asleep, and checks the register settings. It writes humidity before `ctrl_meas` so the setting takes effect. The driver uses checked Wire transfers and a single eight-byte read for each conversion. The installed Adafruit BME280 2.3.0 starts conversions in normal mode during initialization and its public reads do not propagate transport errors. The driver instead implements the compensation in Appendix A.1 of the [Bosch BME280 datasheet, BST-BME280-DS001-24 rev. 1.24](https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bme280-ds002.pdf).
+- The datasheet gives 46 ms typical and 53 ms maximum for T ×2, RH ×4 and P ×16. After each successful trigger write the driver waits 60 ms before the first status check, rechecks busy status at 5 ms intervals, and times out at 150 ms. Four independent forced conversions take about 240 ms plus processing in the awake diagnostic when each completes by the first check. These figures are calculated, and sensor timing remains unmeasured on the board.
+- The diagnostic schedules its first burst at arm +10 s and keeps the original start-to-start schedule. It logs skipped slots when the scheduler falls at least a full period behind or a prior burst is still pending. BOOT, motion and tilt continue to run between conversion checks. A burst error discards all partial samples and retries on the next slot. Three consecutive failures enter FAULT and disable and clear motion. A required BME280 missing or failing initialization blocks arming. Disarm or another monitoring fault clears any pending burst. Recovery from fault requires reset after correcting the problem, then a new BOOT arm. The tracked configuration selects `TestMode::None`.
+- Arduino CLI confirmed core 3.3.12. Normal, Environment and ButtonLifecycle all built for `esp32:esp32:esp32` after approval for access to the installed core. Flash/global RAM in bytes were 393644/37380, 408300/37748 and 403200/37628 respectively. Only the Environment binary contained the environmental start and report markers. `git diff --check` passed.
+- The final fake-bus suite and the existing T05 tilt regression passed under WASI, with the T04 lifecycle assertions evaluated at compile time. The T06 suite covers both addresses, identity and calibration rejection, four fresh samples with expected means and units, a guard measured after the trigger write, early ticks, busy status, timeout, rejected writes, short reads, invalid samples and cancellation. Native Windows execution was intermittently blocked by Application Control for T06 and remained blocked for T05. Hardware checks and the merge gate remain pending. No firmware was uploaded and no serial port was opened.
+
+Build from the repository root. Use the CLI and config paths in the T04 handoff. The diagnostic copies differ from the tracked sketch only in the mode selection.
+
+```powershell
+foreach ($mode in 'normal', 'Environment', 'ButtonLifecycle') {
+  $sketch = 'ESP32_Sleep_PoC'
+  if ($mode -ne 'normal') {
+    $sketch = "build-t06-$mode/ESP32_Sleep_PoC"
+    New-Item -ItemType Directory -Force $sketch | Out-Null
+    Get-ChildItem ESP32_Sleep_PoC -File | Copy-Item -Destination $sketch
+    $conf = Join-Path (Resolve-Path $sketch) 'config.h'
+    $source = [IO.File]::ReadAllText($conf)
+    [IO.File]::WriteAllText($conf, $source.Replace('TEST_MODE = TestMode::None', "TEST_MODE = TestMode::$mode"))
+  }
+  & $cli compile --config-file $configPath --fqbn esp32:esp32:esp32 --build-path "build-t06-$mode/firmware" $sketch
+  if ($LASTEXITCODE -ne 0) { break }
+}
+```
+
+Run the fake-bus and existing tilt/lifecycle checks with Zig 0.15.2 and Node 22.22.0. Set `$zig` and `$node` to the respective executable paths. The WASI target runs the tests without generating a native Windows executable.
+
+```powershell
+New-Item -ItemType Directory -Force build-t06-host | Out-Null
+$env:ZIG_GLOBAL_CACHE_DIR = Join-Path $PWD 'build-t06-host/cache'
+& $zig c++ -target wasm32-wasi -std=c++17 -Wall -Wextra -Werror -I tests/fake_bme_wire -I ESP32_Sleep_PoC ESP32_Sleep_PoC/EnvironmentSensor.cpp tests/t06_environment.cpp -o build-t06-host/t06_environment.wasm
+& $zig c++ -target wasm32-wasi -std=c++17 -Wall -Wextra -Werror -I ESP32_Sleep_PoC ESP32_Sleep_PoC/TiltDetector.cpp tests/t05_tilt.cpp tests/t04_lifecycle.cpp -o build-t06-host/t05_tilt.wasm
+$runner = "const fs = require('node:fs'); const { WASI } = require('node:wasi'); for (const file of process.argv.slice(1)) { const wasi = new WASI({version:'preview1'}); const mod = new WebAssembly.Module(fs.readFileSync(file)); const code = wasi.start(new WebAssembly.Instance(mod, wasi.getImportObject())); if (code) process.exit(code); console.log(file, 'passed'); }"
+& $node --no-warnings -e $runner build-t06-host/t06_environment.wasm build-t06-host/t05_tilt.wasm
+```
+
+Board checklist for the T06 merge gate. The owner runs these checks.
+
+1. With power off, confirm BME280 power at 3.3 V, common ground, SDA GPIO21 and SCL GPIO22. Select `TestMode::Environment` and upload to ESP32 Dev Module. Open Serial Monitor at 115200 baud. Capture `Mode BME280 acquisition test`, `DISARMED`, the detected address (`0x76` or `0x77`), chip ID `0x60` and the ready line showing ×2/×4/×16 and IIR off. Keep BOOT released during reset.
+2. Arm with a qualified BOOT hold and keep the unit flat through zeroing. Capture `ARMED` and at least five pairs of `ENV_BURST_STARTED` and `ENV_REPORT`. Check the first start is around arm +10 s, starts remain about 10 s apart, and each report gives four samples and plausible local °C, %RH and hPa. Record report-to-report deviations against the V08 suggested ±250 ms tolerance and the start-to-report time. If a bus analyzer is available, use it to verify four writes of `0x55` to `0xF4`, each followed by one eight-byte sample read from `0xF7`.
+3. Tap around expected burst starts and capture an `IMPACT_DETECTED` between a start and its report. Sustain an inclination above 30° across a burst, then return flat. Capture tilt detect/clear while the environmental cadence continues. In a separate trial, time a qualified BOOT hold to disarm between a burst start and its report. Check for no post-disarm report and verify the first burst after rearm begins at the new arm time +10 s.
+4. If feasible, power off, disconnect only the BME280 and boot the same diagnostic. Expect `ENV_INIT_ERROR` and `ARMING_REFUSED` on a qualified hold. With power off reconnect the sensor, reset, and explicitly arm again. Restore `TestMode::None` after testing.
