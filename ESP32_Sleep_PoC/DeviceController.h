@@ -14,6 +14,7 @@ class DeviceController {
     UptimeMs deadlineMs;
     bool bootWakeEnabled;
     bool motionWakeEnabled;
+    bool bootPressed;
   };
 
   void initializeButton(UptimeMs nowMs, bool pressed) { button_ = Button(pressed, nowMs); }
@@ -144,7 +145,8 @@ class DeviceController {
   template <typename Io>
   IdleState idleState(Io &io, UptimeMs buttonCheckedMs) const {
     const bool motionEnabled = state_ == State::Armed && io.motionEnabled();
-    const bool bootChanged = button_.inputChanged(io.bootPressed());
+    const bool bootPressed = io.bootPressed();
+    const bool bootChanged = button_.inputChanged(bootPressed);
     const bool motionAsserted = motionEnabled && io.motionAsserted();
     const UptimeMs nowMs = io.now();
     const UptimeMs retryMs = io.motionRetryAt();
@@ -156,7 +158,7 @@ class DeviceController {
       if (deadline < deadlineMs) deadlineMs = deadline;
     }
     if (motionEnabled && retryMs != 0 && retryMs < deadlineMs) deadlineMs = retryMs;
-    return {deadlineMs, !button_.wakeMasked(), motionReady};
+    return {deadlineMs, !button_.wakeMasked(), motionReady, bootPressed};
   }
 
   Button button_;
