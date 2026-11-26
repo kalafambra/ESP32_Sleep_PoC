@@ -45,6 +45,10 @@ constexpr uint32_t BUTTON_HOLD_MS = 300;
 constexpr uint32_t ARMING_DELAY_MS = 10000;
 constexpr uint32_t ZEROING_TIME_MS = 2000;
 constexpr uint32_t ZEROING_SAMPLE_MS = 10;
+constexpr float ZEROING_MIN_MAGNITUDE_G = 0.85f;
+constexpr float ZEROING_MAX_MAGNITUDE_G = 1.15f;
+constexpr float ZEROING_MAX_RMS_RESIDUAL_G = 0.03f;
+constexpr uint32_t ZEROING_MIN_SAMPLE_PERCENT = 90;
 constexpr uint8_t SENSOR_FAILURE_LIMIT = 3;
 
 constexpr bool ENABLE_SLEEP = true;
@@ -54,7 +58,7 @@ constexpr bool ENABLE_TILT_DETECTION = true;
 constexpr bool ENABLE_ENV_ACQUISITION = true;
 
 enum class TestMode { None, FoundationUptime, MpuAcceleration, MotionLatch, ButtonLifecycle };
-constexpr TestMode TEST_MODE = TestMode::None;
+constexpr TestMode TEST_MODE = TestMode::ButtonLifecycle;
 constexpr uint8_t MOTION_LATCH_TEST_THRESHOLD_RAW = 40;
 constexpr uint8_t MPU_MOTION_THRESHOLD_RAW =
     TEST_MODE == TestMode::MotionLatch ? MOTION_LATCH_TEST_THRESHOLD_RAW : IMPACT_THRESHOLD_RAW;
@@ -89,8 +93,12 @@ static_assert(IMPACT_THRESHOLD_RAW > 0 && MOTION_LATCH_TEST_THRESHOLD_RAW > 0 &&
               "Impact thresholds and duration must be positive");
 static_assert(BUTTON_DEBOUNCE_MS > 0 && BUTTON_HOLD_MS >= BUTTON_DEBOUNCE_MS, "Invalid button timing");
 static_assert(ZEROING_TIME_MS > 0 && ZEROING_TIME_MS <= ARMING_DELAY_MS && ZEROING_SAMPLE_MS > 0
-                  && ZEROING_SAMPLE_MS <= ZEROING_TIME_MS,
+                  && ZEROING_SAMPLE_MS <= ZEROING_TIME_MS && ZEROING_TIME_MS % ZEROING_SAMPLE_MS == 0,
               "Zeroing samples must fit in the arming delay");
+static_assert(ZEROING_MIN_MAGNITUDE_G > 0 && ZEROING_MIN_MAGNITUDE_G < ZEROING_MAX_MAGNITUDE_G &&
+                  ZEROING_MAX_RMS_RESIDUAL_G > 0 && ZEROING_MIN_SAMPLE_PERCENT > 0 &&
+                  ZEROING_MIN_SAMPLE_PERCENT <= 100,
+              "Invalid zeroing stability limits");
 static_assert(SENSOR_FAILURE_LIMIT > 0, "Sensor failure limit must be positive");
 static_assert(FOUNDATION_UPTIME_LOG_MS > 0 && AWAKE_IDLE_YIELD_MS > 0, "Foundation intervals must be positive");
 static_assert(MPU_REGISTER_READY_WAIT_MS > 0 && MPU_WAKE_SETTLE_MS > 0 &&

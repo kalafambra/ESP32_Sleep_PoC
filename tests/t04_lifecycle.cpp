@@ -124,6 +124,22 @@ constexpr bool keepsFullReferenceWindowAfterLateTick() {
       && controller.tick(late + zeroing, false, true) == Event::ReferenceWindowElapsed;
 }
 
+constexpr bool retriesReferenceAndAllowsCancellation() {
+  DeviceController controller;
+  const UptimeMs firstEnd = start + countdown;
+  if (controller.tick(start, true, true) != Event::ArmingStarted
+      || controller.tick(firstEnd - zeroing, false, true) != Event::ReferenceWindowStarted
+      || controller.tick(firstEnd, false, true) != Event::ReferenceWindowElapsed) return false;
+  controller.retryReference(firstEnd);
+  if (controller.state() != State::Arming
+      || controller.nextDeadline() != firstEnd + zeroing
+      || controller.tick(firstEnd + zeroing - 1, false, true) != Event::None
+      || controller.tick(firstEnd + zeroing, false, true) != Event::ReferenceWindowElapsed) return false;
+  controller.retryReference(firstEnd + zeroing);
+  return controller.tick(firstEnd + 2 * zeroing, true, true) == Event::Disarmed
+      && controller.state() == State::Disarmed;
+}
+
 constexpr bool faultRequiresReset() {
   DeviceController controller;
   if (controller.tick(start, true, false) != Event::ArmRefused
@@ -147,6 +163,7 @@ static_assert(requiresReleaseAfterHeldBoot(), "A button held at boot must be rel
 static_assert(completesCountdownAndStartsFreshOnRearm(), "Countdown and rearm deadlines must be fresh");
 static_assert(cancelsAtEitherDeadline(), "Cancellation must take priority at arming deadlines");
 static_assert(keepsFullReferenceWindowAfterLateTick(), "A late tick must preserve the full reference window");
+static_assert(retriesReferenceAndAllowsCancellation(), "Zeroing retry must keep a full window and allow cancellation");
 static_assert(faultRequiresReset(), "Fault must prevent automatic rearm and reset must start disarmed");
 
 }  // namespace

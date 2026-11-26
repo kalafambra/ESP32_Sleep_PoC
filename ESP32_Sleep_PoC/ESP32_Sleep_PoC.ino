@@ -7,6 +7,7 @@
 #include "Button.h"
 #include "DeviceController.h"
 #include "MotionSensor.h"
+#include "TiltDetector.h"
 #include "Uptime.h"
 #include "config.h"
 
@@ -20,6 +21,9 @@ constexpr bool lifecycleTestEnabled = Config::TEST_MODE == Config::TestMode::But
 MotionSensor motionSensor(Wire);
 Button bootButton;
 DeviceController lifecycle;
+ReferenceCollector referenceCollector;
+TiltDetector tiltDetector;
+uint8_t lifecycleAccelFailures = 0;
 const char *armingBlockReason = nullptr;
 UptimeMs nextUptimeLogMs = 0;
 UptimeMs nextAccelLogMs = 0;
@@ -89,7 +93,7 @@ void printMpuStartup(bool wireReady, const MotionSensor::Initialization &mpu) {
 
 void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool bluetoothOff,
                         const MotionSensor::Initialization &mpu) {
-  Serial0.printf("ESP32 Sleep PoC | T04 BOOT lifecycle | Arduino-ESP32 %s\n", ESP_ARDUINO_VERSION_STR);
+  Serial0.printf("ESP32 Sleep PoC | T05 reference and tilt | Arduino-ESP32 %s\n", ESP_ARDUINO_VERSION_STR);
   const char *mode = uptimeTestEnabled ? "foundation uptime test" : "normal";
   if (accelTestEnabled) {
     mode = "MPU acceleration test";
@@ -113,14 +117,18 @@ void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool b
                  onOff(Config::ENABLE_IMPACT_DETECTION), onOff(Config::ENABLE_TILT_DETECTION),
                  onOff(Config::ENABLE_ENV_ACQUISITION), onOff(Config::ENABLE_SLEEP), onOff(statusLedEnabled));
   if (lifecycleTestEnabled) {
-    Serial0.printf("Lifecycle diagnostic | debounce %lu ms | qualified hold %lu ms | countdown %lu ms | reference timing hook %lu ms\n",
+    Serial0.printf("Lifecycle diagnostic | debounce %lu ms | qualified hold %lu ms | countdown %lu ms | reference window %lu ms\n",
                    static_cast<unsigned long>(Config::BUTTON_DEBOUNCE_MS),
                    static_cast<unsigned long>(Config::BUTTON_HOLD_MS),
                    static_cast<unsigned long>(Config::ARMING_DELAY_MS),
                    static_cast<unsigned long>(Config::ZEROING_TIME_MS));
-    Serial0.println("Reference validation, tilt, environmental acquisition and light sleep pending | diagnostic ARMED is motion-only when enabled");
+    Serial0.printf("Tilt diagnostic %s | check every %lu ms | detect at %.1f deg | clear at %.1f deg | persistence %lu ms\n",
+                   onOff(Config::ENABLE_TILT_DETECTION), static_cast<unsigned long>(Config::TILT_INTERVAL_MS),
+                   Config::TILT_THRESHOLD_DEG, Config::TILT_THRESHOLD_DEG - Config::TILT_HYSTERESIS_DEG,
+                   static_cast<unsigned long>(Config::TILT_PERSISTENCE_MS));
+    Serial0.println("CPU awake | environmental acquisition and light sleep pending");
   } else {
-    Serial0.println("Integrated monitoring, reference validation and light sleep pending | CPU awake");
+    Serial0.println("Integrated monitoring pending | CPU awake");
   }
   Serial0.printf("Radios | Wi-Fi %s | Bluetooth %s\n", wifiOff ? "off" : "shutdown failed",
                  bluetoothOff ? "off" : "shutdown failed");
@@ -163,6 +171,8 @@ void stopMotion(const char *reason) {
   printTimestamp(uptimeMs());
   if (lifecycleTestEnabled) {
     lifecycle.enterFault();
+    tiltDetector.disarm();
+    referenceCollector = ReferenceCollector{};
     setStatusLed(false);
   }
   Serial0.printf("MOTION_FAULT | %s | disable/clear: %s | %s | reset after inspection\n",
@@ -231,6 +241,42 @@ void serviceMotion(UptimeMs nowMs) {
   }
 }
 
+bool checkLifecycleAccel(const Result<Vec3> &sample, UptimeMs nowMs, bool reportFirstFailure) {
+  if (sample.valid()) {
+    lifecycleAccelFailures = 0;
+    return true;
+  }
+  ++lifecycleAccelFailures;
+  if (reportFirstFailure && lifecycleAccelFailures == 1) {
+    printTimestamp(nowMs);
+    Serial0.printf("TILT_ACCEL_ERROR | %s | angle unavailable\n", errorText(sample.error));
+  }
+  if (lifecycleAccelFailures < Config::SENSOR_FAILURE_LIMIT) return true;
+
+  const bool wasArmed = lifecycle.state() == DeviceController::State::Armed;
+  lifecycle.enterFault();
+  tiltDetector.disarm();
+  referenceCollector = ReferenceCollector{};
+  setStatusLed(false);
+  const bool cleanupNeeded = wasArmed && Config::ENABLE_IMPACT_DETECTION;
+  const Error cleanup = cleanupNeeded ? motionSensor.disableMotion() : Error::None;
+  printTimestamp(uptimeMs());
+  Serial0.printf("MPU_ACCEL_FAULT | %s | motion disable/clear: %s | FAULT | reset after inspection\n",
+                 errorText(sample.error), cleanupNeeded ? errorText(cleanup) : "already disabled");
+  return false;
+}
+
+const char *referenceFailureText(ReferenceCollector::Failure failure) {
+  switch (failure) {
+    case ReferenceCollector::Failure::None: return "OK";
+    case ReferenceCollector::Failure::InvalidSample: return "invalid acceleration sample";
+    case ReferenceCollector::Failure::TooFewSamples: return "too few scheduled samples";
+    case ReferenceCollector::Failure::Magnitude: return "reference magnitude out of range";
+    case ReferenceCollector::Failure::Movement: return "reference movement exceeded stability limit";
+  }
+  return "unknown reference failure";
+}
+
 void serviceLifecycle(UptimeMs nowMs) {
   const bool pressed = bootButton.tick(nowMs, digitalRead(Config::BOOT_PIN) == LOW);
   const bool wasArmed = lifecycle.state() == DeviceController::State::Armed;
@@ -238,18 +284,33 @@ void serviceLifecycle(UptimeMs nowMs) {
     case DeviceController::Event::None:
       return;
     case DeviceController::Event::ArmingStarted:
+      lifecycleAccelFailures = 0;
       setStatusLed(true);
       printTimestamp(nowMs);
       Serial0.println("ARMING_STARTED | lifecycle diagnostic");
       return;
     case DeviceController::Event::ReferenceWindowStarted:
+      referenceCollector.start(nowMs);
       printTimestamp(nowMs);
-      Serial0.println("ZEROING_STARTED | diagnostic timing hook; reference validation pending");
+      Serial0.println("ZEROING_STARTED | keep device stationary");
       return;
     case DeviceController::Event::ReferenceWindowElapsed: {
-      // This opt-in diagnostic exercises the transition without creating a reference.
+      const auto outcome = referenceCollector.finish();
+      if (outcome.failure != ReferenceCollector::Failure::None) {
+        printTimestamp(nowMs);
+        Serial0.printf("ZEROING_RETRY | %s | samples=%lu\n",
+                       referenceFailureText(outcome.failure), static_cast<unsigned long>(outcome.samples));
+        const UptimeMs retryMs = uptimeMs();
+        lifecycle.retryReference(retryMs);
+        referenceCollector.start(retryMs);
+        printTimestamp(retryMs);
+        Serial0.println("ZEROING_STARTED | keep device stationary");
+        return;
+      }
       printTimestamp(nowMs);
-      Serial0.println("ZEROING_SKIPPED | diagnostic timing hook complete");
+      Serial0.printf("ZEROING_OK | samples=%lu | magnitude=%.3f g | RMS residual=%.4f g\n",
+                     static_cast<unsigned long>(outcome.samples), outcome.reference.magnitudeG,
+                     outcome.rmsResidualG);
       if (Config::ENABLE_IMPACT_DETECTION) {
         const Error error = motionSensor.enableMotion();
         if (error != Error::None) {
@@ -259,13 +320,18 @@ void serviceLifecycle(UptimeMs nowMs) {
         motionFailures = 0;
         nextMotionCheckMs = 0;
       }
+      const UptimeMs armedMs = uptimeMs();
+      if (Config::ENABLE_TILT_DETECTION) tiltDetector.arm(armedMs, outcome.reference);
       lifecycle.completeArm();
       setStatusLed(false);
-      printTimestamp(uptimeMs());
-      Serial0.printf("ARMED | lifecycle diagnostic | motion %s\n", onOff(Config::ENABLE_IMPACT_DETECTION));
+      printTimestamp(armedMs);
+      Serial0.printf("ARMED | lifecycle diagnostic | motion %s | tilt %s\n",
+                     onOff(Config::ENABLE_IMPACT_DETECTION), onOff(Config::ENABLE_TILT_DETECTION));
       return;
     }
     case DeviceController::Event::Disarmed:
+      tiltDetector.disarm();
+      referenceCollector = ReferenceCollector{};
       setStatusLed(false);
       if (wasArmed && Config::ENABLE_IMPACT_DETECTION) {
         const Error error = motionSensor.disableMotion();
@@ -281,6 +347,25 @@ void serviceLifecycle(UptimeMs nowMs) {
       printTimestamp(nowMs);
       Serial0.printf("ARMING_REFUSED | FAULT | %s | reset after inspection\n", armingBlockReason);
       return;
+  }
+}
+
+void serviceLifecycleAcceleration(UptimeMs nowMs) {
+  if (lifecycle.state() == DeviceController::State::Arming && referenceCollector.due(nowMs)) {
+    const auto sample = motionSensor.readAccel();
+    referenceCollector.observe(nowMs, sample);
+    checkLifecycleAccel(sample, uptimeMs(), false);
+  } else if (lifecycle.state() == DeviceController::State::Armed &&
+             nowMs >= tiltDetector.nextDeadline()) {
+    const auto sample = motionSensor.readAccel();
+    const auto observation = tiltDetector.observe(nowMs, sample);
+    const UptimeMs recognizedMs = uptimeMs();
+    if (!checkLifecycleAccel(sample, recognizedMs, true) ||
+        observation.transition == TiltDetector::Transition::None) return;
+    printTimestamp(recognizedMs);
+    Serial0.printf("%s angle=%.2f deg\n",
+                   observation.transition == TiltDetector::Transition::Detected ? "TILT_DETECTED" : "TILT_CLEARED",
+                   observation.angleDeg);
   }
 }
 
@@ -309,7 +394,7 @@ void setup() {
     bootButton = Button(digitalRead(Config::BOOT_PIN) == LOW, nowMs);
     if (!cpuConfigured || !wifiOff || !bluetoothOff) {
       armingBlockReason = "platform startup failed";
-    } else if (Config::ENABLE_IMPACT_DETECTION && mpu.error != Error::None) {
+    } else if (mpu.error != Error::None) {
       armingBlockReason = errorText(mpu.error);
     }
   }
@@ -336,6 +421,7 @@ void loop() {
     if (Config::ENABLE_IMPACT_DETECTION && lifecycle.state() == DeviceController::State::Armed) {
       serviceMotion(uptimeMs());
     }
+    serviceLifecycleAcceleration(uptimeMs());
     yield();
     return;
   }

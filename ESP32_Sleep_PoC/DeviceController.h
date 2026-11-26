@@ -38,7 +38,12 @@ class DeviceController {
     return Event::ReferenceWindowElapsed;
   }
 
-  // The caller completes the pending arm after the reference hook and hardware checks.
+  // Start another full reference window while remaining in ARMING.
+  constexpr void retryReference(UptimeMs nowMs) {
+    deadlineMs_ = nowMs + Config::ZEROING_TIME_MS;
+  }
+
+  // The caller completes the pending arm after reference validation and hardware checks.
   constexpr void completeArm() {
     state_ = State::Armed;
     deadlineMs_ = NO_DEADLINE_MS;

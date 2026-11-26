@@ -1,11 +1,12 @@
 # Project status and handoff
-Revision 0.4 requirements baseline. Updated for T04 on 2026-11-26.
+Revision 0.5 requirements baseline. Updated for T05 on 2026-11-26.
 
 ## Current state
 - The foundation initializes UART0, CPU frequency, shared I2C and GPIOs. The firmware starts DISARMED, reports startup faults and stays awake. T02 initializes the MPU6050 for continuous acceleration and reports identity and register readback at startup. T03 configures and verifies the motion detector with its interrupt masked at startup. The MotionLatch diagnostic enables it at startup. The opt-in T04 ButtonLifecycle diagnostic enables it only on diagnostic arming and disables and clears it on disarm. The optional acceleration diagnostic reports signed XYZ and magnitude once per second.
 - Selected architecture: explicit ESP32 light sleep, continuous MPU6050 accelerometer with latched GPIO4 motion interrupt, 1 s tilt checks with 5 s persistence, BME280 four forced samples every 10 s.
 - The owner completed the T01 board check. T01 is merged in `78d6897`, the starting base for T02. The owner reported a passing T02 board retest with appropriate acceleration magnitude readings after the initialization-order change.
 - The owner verified latched motion on GPIO4 after rewiring for T03.
+- The opt-in ButtonLifecycle diagnostic now collects a stationary gravity reference and runs scheduled tilt checks alongside motion. Default mode starts DISARMED and stays awake.
 
 ## Environment
 | Item | Recorded value |
@@ -17,7 +18,7 @@ Revision 0.4 requirements baseline. Updated for T04 on 2026-11-26.
 | OS / toolchain | Windows 25H2 (build 26200), Xtensa ESP GCC package `esp-x32@2601` |
 | Dependency versions | `Wire` and ESP-IDF APIs bundled with Arduino-ESP32 3.3.12. No separate sensor library for T02. |
 | Compile command | See [Build and board checks](#build-and-board-checks). |
-| Test command | The Arduino compile runs the T02 signed-conversion assertions. The T04 diagnostic build procedure below also compiles the fake-time assertions. |
+| Test command | Arduino builds evaluate the T02 signed-conversion assertions. See the T05 handoff for the lifecycle assertions and native tilt tests. |
 | Upload/serial procedure | See [Build and board checks](#build-and-board-checks). Owner operates hardware. |
 | Sketch path | `ESP32_Sleep_PoC/ESP32_Sleep_PoC.ino` |
 
@@ -47,8 +48,8 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 | T01 | MERGED | normal and uptime diagnostic passed | owner board check passed | Merge `78d6897` |
 | T02 | MERGED | updated normal and both diagnostics passed | owner retest passed | Tip 171f429 present on master. Optional missing-module check unreported. |
 | T03 | MERGED | raw 40 MotionLatch and raw 50 normal rebuilds passed | V06 and awake V07 passed at raw 50 | Tip `592b99f` on `master` with normal mode selected. Raw 40 sensitivity trial pending. |
-| T04 | VERIFIED | normal and ButtonLifecycle builds passed, eight fake-time assertions passed | Owner confirmed short press, held press, disarm and both cancellation paths. Countdown and reset-to-DISARMED observed. | BOOT merge gate met. Reference timing hook only. |
-| T05 | NOT_STARTED | pending | pending | |
+| T04 | MERGED | normal and ButtonLifecycle builds passed, eight fake-time assertions passed | Owner confirmed short press, held press, disarm and both cancellation paths. Countdown and reset-to-DISARMED observed. | Merge `6c32bdb`. |
+| T05 | IMPLEMENTED_PENDING_VERIFICATION | both Arduino builds and nine lifecycle assertions passed; native tilt suite compiled, execution blocked | V03–V05 board checks pending | Windows Application Control blocked the native test executable. |
 | T06 | NOT_STARTED | pending | pending | |
 | T07 | NOT_STARTED | pending | pending | |
 | T08 | NOT_STARTED | pending | pending | |
@@ -203,4 +204,48 @@ The owner reported that a short press did nothing, a long hold through arming is
 
 In the first cancellation attempts, releasing the initial press let the countdown continue to ARMED, as specified by ARM-03. The owner then confirmed cancellation with a second qualified hold in both windows. The first trial logged ARMING_STARTED at 00:00:01.985 and DISARMED with arming cancelled at 00:00:03.388, 1.403 s into the countdown. The second logged ARMING_STARTED at 00:00:14.376, ZEROING_STARTED at 00:00:22.376 and DISARMED with arming cancelled at 00:00:23.161, 0.785 s into the reference timing window. The supplied trace shows no ARMED event for either trial.
 
-The T04 merge gate in TASKS.md is met. The owner's working copy currently selects ButtonLifecycle for board testing. Restore None before including config.h in a commit. The full motion isolation and stale-event rearm board checks remain unreported. The diagnostic remains awake and the reference timing hook supplies no gravity reference.
+The T04 merge gate in TASKS.md was met. The owner selected ButtonLifecycle for the board test. The full motion isolation and stale-event rearm board checks remain unreported. At T04 the diagnostic stayed awake and the reference timing hook supplied no gravity reference.
+
+### T05 reference and tilt · 2026-11-26 · `feat/T05-tilt`
+
+- Started with a clean tree at `d838ecf`. The verified T04 merge `6c32bdb` is present on the branch. The tracked build selects `TestMode::None`. Select `TestMode::ButtonLifecycle` to exercise T05.
+- During the final 2 s of countdown, collect one acceleration sample per 10 ms slot. Accept at least 180 of 200 samples, zero invalid reads, mean vector magnitude of 0.85–1.15 g, and RMS vector residual at or below 0.03 g. A rejected window produces `ZEROING_RETRY` and starts a fresh 2 s window. Keep the board flat and stationary during zeroing. The collector accepts any stationary gravity direction because the mounting axes are unspecified.
+- Arm with a fixed unit gravity vector and its measured magnitude. The first tilt check is due at arm +1 s. Use the median of three angles seeded at 0° from the reference. An invalid or missed check clears persistence and makes the angle unavailable until three consecutive valid samples rebuild the median. The confirmed state survives transient interruptions. The next sample stays on the original schedule, with skipped slots counted. Persistence starts at the time of the first qualifying filtered observation. Scheduling jitter can move a transition to the next check if five seconds have yet to elapse.
+- The BOOT diagnostic retains press qualification, cancellation and disarm. Zeroing acquires the MPU even with impact disabled. Successful arming enables motion if configured. Three consecutive MPU acceleration read failures across zeroing or tilt enter FAULT, stop monitoring and disable and clear any armed motion interrupt. Restore the sensor and reset before retrying. Tilt checks use ordinary acceleration reads. Motion acknowledgement remains in the MPU driver.
+- Both Arduino CLI builds passed using the installed Arduino-ESP32 core with approved access after the sandbox denied access to the Arduino package directory. Normal used 393648 bytes of flash and 37380 bytes of global RAM. ButtonLifecycle used 403216 bytes of flash and 37628 bytes of global RAM. The diagnostic build compiled the nine fake-time lifecycle assertions, including retry and cancellation.
+- The native tilt and reference suite compiled with Zig 0.15.2 and `-Wall -Wextra -Werror`. Windows Application Control blocked the generated executable both inside and outside the sandbox. Runtime assertions remain pending on a host that permits running the binary. `git diff --check` passed.
+
+Run from the repository root. Use the CLI and config paths in the T04 handoff.
+
+```powershell
+& $cli compile --config-file $configPath --fqbn esp32:esp32:esp32 --build-path build-t05-normal ESP32_Sleep_PoC
+
+$stage = 'build-t05-diagnostic/ESP32_Sleep_PoC'
+New-Item -ItemType Directory -Force -Path $stage | Out-Null
+Copy-Item -Path ESP32_Sleep_PoC/* -Destination $stage
+Copy-Item -LiteralPath tests/t04_lifecycle.cpp -Destination $stage
+$stagedConfig = Join-Path $stage config.h
+$content = Get-Content -LiteralPath $stagedConfig -Raw
+$content.Replace('TEST_MODE = TestMode::None;', 'TEST_MODE = TestMode::ButtonLifecycle;') |
+    Set-Content -LiteralPath $stagedConfig -Encoding ascii -NoNewline
+& $cli compile --config-file $configPath --fqbn esp32:esp32:esp32 --build-path build-t05-diagnostic/firmware $stage
+```
+
+Run the fake-time tilt and reference tests with a native C++17 compiler. For Zig 0.15.2, set `$zig` to the path of `zig.exe` and run from the repository root.
+
+```powershell
+New-Item -ItemType Directory -Force -Path build-t05-host | Out-Null
+$env:ZIG_GLOBAL_CACHE_DIR = Join-Path $PWD 'build-t05-host/cache'
+& $zig c++ -std=c++17 -Wall -Wextra -Werror -I ESP32_Sleep_PoC ESP32_Sleep_PoC/TiltDetector.cpp tests/t05_tilt.cpp tests/t04_lifecycle.cpp -o build-t05-host/t05_tilt.exe
+if ($LASTEXITCODE -eq 0) { & ./build-t05-host/t05_tilt.exe }
+```
+
+Owner board checks for V03–V05. All are pending.
+
+1. Follow the wiring and Serial Monitor steps above. Upload the staged ButtonLifecycle diagnostic with BOOT released. Confirm DISARMED at boot. With the board flat and still, qualify a BOOT hold and release. Expect `ARMING_STARTED`, `ZEROING_STARTED` around +8 s and `ZEROING_OK` followed by diagnostic `ARMED` around +10 s. Capture sample count, magnitude and residual. Keep it flat through several tilt checks.
+2. Disarm and start another countdown. After `ZEROING_STARTED`, rock the board repeatedly throughout the window. Expect `ZEROING_RETRY` and another `ZEROING_STARTED`. Hold it still through the fresh 2 s window and expect `ZEROING_OK` and `ARMED`. In a separate trial, cancel during a retry window with a qualified BOOT hold and verify DISARMED. Reset with BOOT released and verify DISARMED.
+3. From a stationary reference, briefly tilt to about 40° and return within 3 s. Expect no tilt transition. Then quickly move to about 40° and hold. Expect one `TILT_DETECTED` about 6–7 s after the physical step under typical cadence. Keep holding to check for repeats. Move to about 29° and hold for at least 8 s, then return to flat. Expect one `TILT_CLEARED` after the return. Record fixture angles and elapsed times. Use the native tests to verify the exact inclusive 30° and 27° boundaries.
+4. Slowly raise the board past 30° and hold. Repeat with the opposite incline, sideways and combined roll/pitch, returning flat long enough to clear each time. Rotate the board about the vertical axis while flat and verify no tilt event. To isolate tilt from GPIO4, repeat the slow-tilt trial in a diagnostic build with `ENABLE_IMPACT_DETECTION = false`. Restore the feature switch after the test.
+5. With motion enabled, verify a known-detectable tap still prints `IMPACT_DETECTED` during tilt monitoring. Disarm and rearm at a different stable orientation, then hold that orientation and verify the new session starts normal. Restore `TestMode::None` after board testing.
+
+Merge gate remains open pending the native suite run and owner board evidence. Sustained linear acceleration can still look like inclination. The diagnostic remains awake, with periodic environmental reports and explicit sleep deferred.
