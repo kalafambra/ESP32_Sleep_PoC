@@ -1,12 +1,12 @@
 # Project status and handoff
-Revision 0.5 requirements baseline. Updated for T07 on 2026-11-26.
+Revision 0.5 requirements baseline. Updated for T08 on 2026-11-26.
 
 ## Current state
 - The firmware initializes UART0, CPU frequency, shared I2C and GPIOs, reports startup status and starts DISARMED. T02 initializes the MPU6050 for continuous acceleration and reports identity and register readback. The motion interrupt stays masked until arming in normal mode. The MotionLatch diagnostic enables it at startup. The acceleration diagnostic reports signed XYZ and magnitude once per second.
 - Selected architecture: explicit ESP32 light sleep, continuous MPU6050 accelerometer with latched GPIO4 motion interrupt, 1 s tilt checks with 5 s persistence, BME280 four forced samples every 10 s.
 - The owner completed the T01 board check. T01 is merged in `78d6897`, the starting base for T02. The owner reported a passing T02 board retest with appropriate acceleration magnitude readings after the initialization-order change.
 - The owner verified latched motion on GPIO4 after rewiring for T03.
-- The default `TestMode::None` runs the full awake scheduler after a qualified BOOT press and stationary zeroing. It services motion, checks tilt every 1 s and runs four-sample BME280 bursts every 10 s. The ButtonLifecycle diagnostic isolates BOOT, reference, tilt and motion. The Environment diagnostic adds `ENV_BURST_STARTED` timestamps to the full awake path.
+- Normal mode runs the full scheduler after a qualified BOOT press and stationary zeroing. It services motion, checks tilt every 1 s and runs four-sample BME280 bursts every 10 s. The checked-in Environment diagnostic adds `ENV_BURST_STARTED` timestamps to the same path. Both modes support explicit light sleep when `ENABLE_SLEEP` is true. The ButtonLifecycle diagnostic isolates BOOT, reference, tilt and motion with the CPU awake.
 
 ## Environment
 | Item | Recorded value |
@@ -18,7 +18,7 @@ Revision 0.5 requirements baseline. Updated for T07 on 2026-11-26.
 | OS / toolchain | Windows 25H2 (build 26200), Xtensa ESP GCC package `esp-x32@2601` |
 | Dependency versions | `Wire` and ESP-IDF APIs bundled with Arduino-ESP32 3.3.12. The MPU6050 and BME280 drivers use register I/O and require no separate sensor libraries. |
 | Compile command | See [Build and board checks](#build-and-board-checks). |
-| Test command | Arduino builds evaluate the T02 signed-conversion assertions. See the T07 handoff for the scheduler suite and T04–T06 regression commands. |
+| Test command | Arduino builds evaluate the T02 signed-conversion assertions. See the T08 handoff for the power suite and the earlier handoffs for regression commands. |
 | Upload/serial procedure | See [Build and board checks](#build-and-board-checks). Owner operates hardware. |
 | Sketch path | `ESP32_Sleep_PoC/ESP32_Sleep_PoC.ino` |
 
@@ -52,7 +52,7 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 | T05 | IMPLEMENTED_PENDING_VERIFICATION | both Arduino builds and nine lifecycle assertions passed; native tilt suite compiled, execution blocked | Owner completed the hardware merge-gate checks, including slow tilt with impact disabled and transient rejection | Windows Application Control blocked the native test executable. |
 | T06 | MERGED | Three Arduino builds and fake-bus tests passed | Owner verified V08 cadence, identity and four-sample reports. Tilt cleared during a burst. Impact reports observed between bursts. | Merge `dff6a53` on `origin/master`. Impact inside a burst still to capture during T07 verification. |
 | T07 | MERGED | Normal and all five diagnostic ESP32 builds passed. Deterministic suites passed. | Owner trace confirms cadence, tilt transitions, an in-burst impact and BOOT disarm. Rearm reported by owner. | Merge `a81a0a7` on `origin/master`. In-burst disarm passed with fake time and I/O. The V11 board case remains open. |
-| T08 | NOT_STARTED | pending | pending | |
+| T08 | IMPLEMENTED_PENDING_VERIFICATION | ESP32 build and deterministic tests passed | V09–V11 and awake comparison pending | Board evidence required for merge. |
 | T09 | NOT_STARTED | pending | pending | |
 | T10 | NOT_STARTED | pending | pending | |
 
@@ -353,3 +353,42 @@ To reproduce the deterministic checks, use the T06 WASI compile and runner comma
 ```powershell
 & $zig c++ -target wasm32-wasi -std=c++17 -Wall -Wextra -Werror -I ESP32_Sleep_PoC ESP32_Sleep_PoC/TiltDetector.cpp tests/t07_scheduler.cpp -o build-t07-host/t07_scheduler.wasm
 ```
+
+### T08 explicit light sleep · 2026-11-26 · `feat/T08-light-sleep`
+
+- Started on a clean tree at `0d7997e`, which merges the T07 board handoff. The T07 on-board disarm during an active BME burst remains open. The checked-in Environment mode and raw motion threshold 25 are the T07 trial settings. Rev 0.5 records raw 50 as the baseline default.
+- Normal and Environment builds with `ENABLE_SLEEP = true` sleep between scheduler deadlines, including BME forced-conversion waits. BOOT LOW can wake from disarmed, arming or armed idle. MPU GPIO4 HIGH wake is eligible while armed, including while BOOT is masked. A pending motion-latch retry uses its existing timer deadline. The ESP32 does not enter sleep while UART0 TX is busy, a wake-enabled input is asserted, BOOT changes since the scheduler's last sample, or a deadline is within 3 ms. Timer configuration is cleared before GPIO-only sleep.
+- The installed Arduino-ESP32 3.3.12 ESP32 SDK headers report ESP-IDF 5.5.5. In this SDK, GPIO wake configuration and GPIO edge interrupts share the trigger type. Sleep-enabled builds use level wake and a bounded awake poll during sleep deferrals. With `ENABLE_SLEEP = false`, the existing edge/semaphore wait is used. Three consecutive sleep-entry failures without an observed input race, or a wake-configuration failure, cause FAULT, cancel pending BME work and disable and clear MPU motion if armed. Reset after inspecting the reported error.
+- `SLEEP_STATS` appears alongside a successful environmental report and when leaving an armed session. Each successful IDF wake contributes one timer, GPIO or other count. BOOT and MPU observations are sampled levels on enabled inputs immediately after a GPIO wake and may overlap. Successful sleep-call elapsed time includes entry and exit overhead. Approximate awake time includes failed sleep calls. Statistics reset on arm and use continuous uptime. See the [ESP-IDF ESP32 sleep API](https://docs.espressif.com/projects/esp-idf/en/v5.5.2/esp32/api-reference/system/sleep_modes.html) and the [5.5.5 GPIO driver](https://github.com/espressif/esp-idf/blob/v5.5.5/components/esp_driver_gpio/src/gpio.c).
+
+#### Build and test
+
+Use the Arduino CLI and config paths in the T04 handoff. Access to the installed Arduino core required approval.
+
+All seven builds passed for `esp32:esp32:esp32`. Flash/global RAM in bytes were 420228/38044 for sleep-enabled Environment, 420172/38044 for normal, 411744/38428 for awake Environment, 409844/38420 for ButtonLifecycle, 395764/37412 for MotionLatch, 394548/37396 for MpuAcceleration and 393724/37388 for FoundationUptime. `git diff --check` passed.
+
+```powershell
+& $cli compile --config-file $configPath --fqbn esp32:esp32:esp32 --build-path build-t08-Environment ESP32_Sleep_PoC
+```
+
+For comparison builds, stage the sketch as in T06 and replace `TEST_MODE = TestMode::Environment` with the mode under test. For the awake Environment comparison, keep the mode and set `ENABLE_SLEEP` to `false` in the staged copy.
+
+Zig 0.15.2 compiled the T08 power, T07 scheduler, T06 environment and T05 tilt/T04 lifecycle suites as C++17 WASI with `-Wall -Wextra -Werror`. All passed under the Node 24.22.1 runtime bundled with VS Code. The power suite checks absolute deadline conversion at high uptime, stale timer removal, concurrent GPIO observations, BOOT masking with motion wake still enabled, input races, UART and deadline deferral, and bounded sleep-entry failures.
+
+```powershell
+New-Item -ItemType Directory -Force build-t08-host | Out-Null
+$env:ZIG_GLOBAL_CACHE_DIR = Join-Path $PWD 'build-t08-host/cache'
+& $zig c++ -target wasm32-wasi -std=c++17 -Wall -Wextra -Werror -I ESP32_Sleep_PoC -I tests/fake_sleep_idf ESP32_Sleep_PoC/PowerManager.cpp tests/t08_power.cpp -o build-t08-host/t08_power.wasm
+```
+
+Use the T06 WASI runner and the T06/T07 regression commands with `build-t08-host` paths. Include `t08_power.wasm` in the runner arguments.
+
+#### Owner board verification pending
+
+1. **Timer wake and cadence (V09).** Flash the Environment build with sleep enabled using the recorded board and wiring. Reset with BOOT released, capture the banner at 115200 baud, let it idle disarmed, then arm with the board flat. Over several reports, check continuous uptime, the first burst at arm +10 s, four samples every 10 s, increasing timer wakes and cumulative sleep-call time, and no reset or `POWER_FAULT`. The quiet intervals should account for most of the armed duration.
+2. **MPU and BOOT wake (V09).** While armed, tap between reports at roughly 500 ms spacing. Save impact lines and successive `SLEEP_STATS` lines showing an increase in GPIO wakes and MPU observations. Try a short BOOT press that stays below qualification and tap while BOOT is low. Check that motion still registers, the board stays armed and BOOT does not cause a rapid rise in GPIO wakes. Then hold BOOT through disarm and keep it held for several seconds. Save the single `DISARMED` event and its final stats, including the BOOT observation. Release before issuing another command.
+3. **Conversion/serial overlap and tilt (V10).** Predict the next burst from the 10 s cadence and tap during its conversion wait and, in a separate trial, around its UART report. Save the burst marker, impact and report timestamps, wake counters and complete serial lines. Check the following burst stays on phase. Repeat the T07 tilt step and return while bursts continue.
+4. **Disarm during a pending conversion and rearm (V11).** Time the start of a BOOT hold shortly before a predicted burst so it qualifies after `ENV_BURST_STARTED` and before the report would normally appear. Use the measured burst duration to time the press. Save the burst marker and `DISARMED`, and check that no report follows for the cancelled burst. Release, rearm at a new stationary orientation and check for a fresh reference, reset session counts, no stale impact, and the first burst at the new arm time +10 s.
+5. **Awake comparison.** Run the same Environment trials with `ENABLE_SLEEP = false` and the same threshold. Verify the scheduler and sensor behavior against T07, sleep-call time and wake counts at zero, and the banner showing sleep off. Record actual results and restore the desired test mode.
+
+No board upload, serial-port opening or current measurement was performed. Hardware wake behavior and the V09–V11 merge gate remain pending.

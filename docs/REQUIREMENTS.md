@@ -36,7 +36,7 @@ Use descriptive units in identifiers; validate ranges and relationships. Default
 | TILT_PERSISTENCE_MS | 5000 | Updated from 300 ms; both transitions |
 | TILT_FILTER_SAMPLES | 3 | Odd window; median of valid angle/cosine samples |
 | TILT_MIN_VALID_RATIO / TILT_MAX_VALID_RATIO | 0.85 / 1.15 | Relative to stationary reference magnitude |
-| IMPACT_THRESHOLD_RAW | 50 | Experimental register value, NOT calibrated g |
+| IMPACT_THRESHOLD_RAW | 35 | Experimental register value, NOT calibrated g |
 | IMPACT_DURATION_MS | 1 | Verify register semantics for actual device |
 | IMPACT_SUPPRESSION_MS | 100 | Tunable, 0 disables |
 | BUTTON_DEBOUNCE_MS | 20 | Proposed stable transitions |

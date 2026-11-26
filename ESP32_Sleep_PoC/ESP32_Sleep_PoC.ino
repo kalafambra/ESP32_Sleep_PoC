@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <esp_arduino_version.h>
+#include <esp_timer.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -9,6 +10,7 @@
 #include "DeviceController.h"
 #include "EnvironmentSensor.h"
 #include "MotionSensor.h"
+#include "PowerManager.h"
 #include "TiltDetector.h"
 #include "Uptime.h"
 #include "config.h"
@@ -24,10 +26,13 @@ constexpr bool normalMode = Config::TEST_MODE == Config::TestMode::None;
 constexpr bool lifecycleTest = Config::TEST_MODE == Config::TestMode::ButtonLifecycle;
 constexpr bool monitoringEnabled = normalMode || lifecycleTest || environmentTest;
 constexpr bool environmentEnabled = (normalMode || environmentTest) && Config::ENABLE_ENV_ACQUISITION;
+constexpr bool lightSleepEnabled = (normalMode || environmentTest) && Config::ENABLE_SLEEP;
 MotionSensor motionSensor(Wire);
 EnvironmentSensor environmentSensor(Wire, uptimeMs);
 uint8_t environmentFailures = 0;
 DeviceController lifecycle;
+PowerManager power;
+uint64_t armedAtUs = 0;
 StaticSemaphore_t schedulerWakeStorage;
 SemaphoreHandle_t schedulerWake = nullptr;
 uint8_t lifecycleAccelFailures = 0;
@@ -101,7 +106,8 @@ void printMpuStartup(bool wireReady, const MotionSensor::Initialization &mpu) {
 void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool bluetoothOff,
                         const MotionSensor::Initialization &mpu,
                         const EnvironmentSensor::Initialization &bme) {
-  Serial0.printf("ESP32 Sleep PoC | T07 awake scheduler | Arduino-ESP32 %s\n", ESP_ARDUINO_VERSION_STR);
+  Serial0.printf("ESP32 Sleep PoC | T08 | Arduino-ESP32 %s | ESP-IDF %s\n",
+                 ESP_ARDUINO_VERSION_STR, ESP.getSdkVersion());
   const char *mode = uptimeTestEnabled ? "foundation uptime test" : "normal";
   if (accelTestEnabled) {
     mode = "MPU acceleration test";
@@ -135,10 +141,10 @@ void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool b
   } else {
     Serial0.println("BME280 acquisition inactive in this build");
   }
-  Serial0.printf("Active monitoring | Impact %s | Tilt %s | Environment %s | Sleep off | Status LED %s\n",
+  Serial0.printf("Active monitoring | Impact %s | Tilt %s | Environment %s | Sleep %s | Status LED %s\n",
                  onOff((monitoringEnabled || latchTestEnabled) && Config::ENABLE_IMPACT_DETECTION),
                  onOff(monitoringEnabled && Config::ENABLE_TILT_DETECTION),
-                 onOff(environmentEnabled), onOff(statusLedEnabled));
+                 onOff(environmentEnabled), onOff(lightSleepEnabled), onOff(statusLedEnabled));
   if (monitoringEnabled) {
     Serial0.printf("BOOT | debounce %lu ms | qualified hold %lu ms | countdown %lu ms | reference window %lu ms\n",
                    static_cast<unsigned long>(Config::BUTTON_DEBOUNCE_MS),
@@ -150,7 +156,6 @@ void printStartupBanner(bool cpuConfigured, bool wireReady, bool wifiOff, bool b
                    Config::TILT_THRESHOLD_DEG, Config::TILT_THRESHOLD_DEG - Config::TILT_HYSTERESIS_DEG,
                    static_cast<unsigned long>(Config::TILT_PERSISTENCE_MS));
   }
-  Serial0.println("CPU awake");
   Serial0.printf("Radios | Wi-Fi %s | Bluetooth %s\n", wifiOff ? "off" : "shutdown failed",
                  bluetoothOff ? "off" : "shutdown failed");
 
@@ -189,6 +194,20 @@ void logAcceleration(UptimeMs nowMs) {
 void clearMonitoringOutputs() {
   if (environmentEnabled) environmentSensor.cancel();
   setStatusLed(false);
+}
+
+void reportSleepStats() {
+  const uint64_t armedUs = static_cast<uint64_t>(esp_timer_get_time()) - armedAtUs;
+  const auto &stats = power.stats();
+  const uint64_t awakeUs = armedUs > stats.sleepCallUs ? armedUs - stats.sleepCallUs : 0;
+  const double utilization = armedUs ? 100.0 * stats.sleepCallUs / armedUs : 0.0;
+  printTimestamp(uptimeMs());
+  Serial0.printf("SLEEP_STATS | mode %s | sleep calls %.3f ms | awake approx %.3f ms | utilization approx %.1f %%"
+                 " | wakes timer=%llu GPIO=%llu other=%llu | GPIO wake observations BOOT=%llu MPU=%llu"
+                 " | entry errors=%llu skips=%llu\n",
+                 lightSleepEnabled ? "light sleep" : "awake", stats.sleepCallUs / 1000.0, awakeUs / 1000.0,
+                 utilization, stats.timerWakes, stats.gpioWakes, stats.otherWakes, stats.bootObserved,
+                 stats.motionObserved, stats.entryErrors, stats.skips);
 }
 
 void stopMotion(const char *reason) {
@@ -340,14 +359,16 @@ void serviceLifecycleEvent(DeviceController::Event event, UptimeMs nowMs, bool w
         motionFailures = 0;
         nextMotionCheckMs = 0;
       }
-      const UptimeMs armedMs = uptimeMs();
+      armedAtUs = esp_timer_get_time();
+      const UptimeMs armedMs = armedAtUs / 1000;
+      power.resetStats();
       environmentFailures = 0;
       lifecycle.completeArm(armedMs, outcome.reference, Config::ENABLE_TILT_DETECTION, environmentEnabled);
       setStatusLed(false);
       printTimestamp(armedMs);
-      Serial0.printf("ARMED | motion %s | tilt %s | environment %s | CPU awake\n",
+      Serial0.printf("ARMED | motion %s | tilt %s | environment %s | sleep %s\n",
                      onOff(Config::ENABLE_IMPACT_DETECTION), onOff(Config::ENABLE_TILT_DETECTION),
-                     onOff(environmentEnabled));
+                     onOff(environmentEnabled), onOff(lightSleepEnabled));
       return;
     }
     case DeviceController::Event::Disarmed:
@@ -378,6 +399,7 @@ void reportEnvironment() {
     Serial0.printf("ENV_REPORT | temperature %.2f C | humidity %.2f %%RH | pressure %.2f hPa | samples %u\n",
                    result.average.temperatureC, result.average.humidityPercent, result.average.pressureHpa,
                    result.samples);
+    reportSleepStats();
     return;
   }
   Serial0.printf("ENV_ERROR | %s | consecutive failures %u/%u\n",
@@ -472,6 +494,32 @@ void waitAwake(UptimeMs deadlineMs) {
   xSemaphoreTake(schedulerWake, timeout);
 }
 
+void idleScheduler(const DeviceController::IdleState &idle) {
+  if (!lightSleepEnabled) {
+    waitAwake(idle.deadlineMs);
+    return;
+  }
+  if (armingBlockReason != nullptr || lifecycle.state() == DeviceController::State::Fault) {
+    waitAwake(idle.deadlineMs);
+    return;
+  }
+
+  const auto result = power.sleepUntil(idle.deadlineMs, idle.bootWakeEnabled, idle.motionWakeEnabled, idle.bootPressed);
+  if (result.action == PowerManager::Action::WaitAwake) {
+    waitAwake(std::min(idle.deadlineMs, uptimeMs() + Config::SLEEP_RETRY_MS));
+  } else if (result.action == PowerManager::Action::Fault) {
+    const bool wasArmed = lifecycle.state() == DeviceController::State::Armed;
+    lifecycle.enterFault();
+    clearMonitoringOutputs();
+    const Error cleanup = wasArmed && Config::ENABLE_IMPACT_DETECTION ? motionSensor.disableMotion() : Error::None;
+    printTimestamp(uptimeMs());
+    Serial0.printf("POWER_FAULT | %s: %s (0x%X) | motion cleanup %s | FAULT | reset after inspection\n",
+                   result.operation, esp_err_to_name(result.error), static_cast<unsigned>(result.error),
+                   errorText(cleanup));
+    if (wasArmed) reportSleepStats();
+  }
+}
+
 }  // namespace
 
 void setup() {
@@ -497,8 +545,11 @@ void setup() {
   if (monitoringEnabled) {
     lifecycle.initializeButton(nowMs, digitalRead(Config::BOOT_PIN) == LOW);
     schedulerWake = xSemaphoreCreateBinaryStatic(&schedulerWakeStorage);
-    attachInterrupt(Config::BOOT_PIN, signalScheduler, CHANGE);
-    if (Config::ENABLE_IMPACT_DETECTION) attachInterrupt(Config::MPU_INT_PIN, signalScheduler, RISING);
+    // GPIO level wake and edge interrupts share the hardware trigger type.
+    if (!lightSleepEnabled) {
+      attachInterrupt(Config::BOOT_PIN, signalScheduler, CHANGE);
+      if (Config::ENABLE_IMPACT_DETECTION) attachInterrupt(Config::MPU_INT_PIN, signalScheduler, RISING);
+    }
     if (!cpuConfigured || !wifiOff || !bluetoothOff) {
       armingBlockReason = "platform startup failed";
     } else if (mpu.error != Error::None) {
@@ -527,7 +578,10 @@ void setup() {
 void loop() {
   if (monitoringEnabled) {
     SchedulerIo io;
-    waitAwake(lifecycle.run(io).deadlineMs);
+    const bool wasArmed = lifecycle.state() == DeviceController::State::Armed;
+    const auto idle = lifecycle.run(io);
+    if (wasArmed && lifecycle.state() != DeviceController::State::Armed) reportSleepStats();
+    idleScheduler(idle);
     return;
   }
   if (latchTestEnabled && motionDiagnosticRunning) serviceMotionStatus(uptimeMs());
