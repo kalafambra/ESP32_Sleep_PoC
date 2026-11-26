@@ -20,6 +20,7 @@ class ReferenceCollector {
 
   void start(UptimeMs nowMs);
   bool due(UptimeMs nowMs) const { return nowMs >= nextSampleMs_ && nowMs < endMs_; }
+  UptimeMs nextDeadline() const { return nextSampleMs_ < endMs_ ? nextSampleMs_ : NO_DEADLINE_MS; }
   void observe(UptimeMs nowMs, const Result<Vec3> &sample);
   Outcome finish() const;
 
@@ -44,7 +45,7 @@ class TiltDetector {
   };
 
   void arm(UptimeMs nowMs, const GravityReference &reference);
-  void disarm() { *this = TiltDetector{}; }
+  constexpr void disarm() { *this = TiltDetector{}; }
   UptimeMs nextDeadline() const { return nextCheckMs_; }
   Observation observe(UptimeMs nowMs, const Result<Vec3> &sample);
   bool tilted() const { return tilted_; }

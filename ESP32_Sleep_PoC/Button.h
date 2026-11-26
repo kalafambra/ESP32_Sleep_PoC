@@ -30,6 +30,7 @@ class Button {
   }
 
   constexpr bool wakeMasked() const { return rawPressed_ || stablePressed_; }
+  constexpr bool inputChanged(bool pressed) const { return pressed != rawPressed_; }
 
   // Poll while wake is masked so a release can be observed with GPIO wake disabled.
   constexpr UptimeMs nextDeadline(UptimeMs nowMs) const {
