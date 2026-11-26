@@ -49,7 +49,7 @@ States: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_PENDING_VERIFICATION, VERIFIED, ME
 | T02 | MERGED | updated normal and both diagnostics passed | owner retest passed | Tip 171f429 present on master. Optional missing-module check unreported. |
 | T03 | MERGED | raw 40 MotionLatch and raw 50 normal rebuilds passed | V06 and awake V07 passed at raw 50 | Tip `592b99f` on `master` with normal mode selected. Raw 40 sensitivity trial pending. |
 | T04 | MERGED | normal and ButtonLifecycle builds passed, eight fake-time assertions passed | Owner confirmed short press, held press, disarm and both cancellation paths. Countdown and reset-to-DISARMED observed. | Merge `6c32bdb`. |
-| T05 | IMPLEMENTED_PENDING_VERIFICATION | both Arduino builds and nine lifecycle assertions passed; native tilt suite compiled, execution blocked | V03–V05 board checks pending | Windows Application Control blocked the native test executable. |
+| T05 | IMPLEMENTED_PENDING_VERIFICATION | both Arduino builds and nine lifecycle assertions passed; native tilt suite compiled, execution blocked | Owner completed the hardware merge-gate checks, including slow tilt with impact disabled and transient rejection | Windows Application Control blocked the native test executable. |
 | T06 | NOT_STARTED | pending | pending | |
 | T07 | NOT_STARTED | pending | pending | |
 | T08 | NOT_STARTED | pending | pending | |
@@ -240,7 +240,14 @@ $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $PWD 'build-t05-host/cache'
 if ($LASTEXITCODE -eq 0) { & ./build-t05-host/t05_tilt.exe }
 ```
 
-Owner board checks for V03–V05. All are pending.
+Owner board evidence for V03–V05.
+
+- The T05 trace shows a power-on reset into `DISARMED` at 00:00:00.417. The first zeroing window began at 00:00:09.800, exactly 8 s after `ARMING_STARTED`. Three consecutive 2 s windows were rejected for movement with 200, 199 and 199 samples. On the fourth window, the stationary board reported `ZEROING_OK` at 00:00:17.800 with 199 samples, 0.969 g mean vector magnitude and 0.0053 g RMS residual. Diagnostic `ARMED` followed at 00:00:17.802.
+- During the steep-tilt trial, the T05 trace shows one `TILT_DETECTED` at 00:00:34.802 (51.42°) and one `TILT_CLEARED` at 00:00:42.802 (0.19°) after release. The owner then disarmed at 00:00:56.166. The trace records recognition times. The physical movement and release times are unknown, so step-to-event latency remains unmeasured.
+- A separate trace with the older T04 startup banner also contains real zeroing and tilt events. It shows stationary zeroing with 200 samples, 0.970 g and 0.0050 g RMS residual, two tilt detect/clear cycles, and impact reports and suppression while tilt monitoring was active.
+- The follow-up T05 trace confirms `Impact off` and `ARMED | lifecycle diagnostic | motion off | tilt on`. Stationary zeroing collected 200 samples (0.970 g, 0.0054 g RMS residual). The owner's slow-tilt trial produced one `TILT_DETECTED` at 00:00:32.345 (45.02°) and one `TILT_CLEARED` at 00:00:40.345 (0.20°). The owner reported no transition during or after the short transient trial. These results complete the hardware checks in the T05 merge gate. The working tree is back to `TestMode::None` with impact enabled.
+
+Board checklist for reproduction and remaining trials.
 
 1. Follow the wiring and Serial Monitor steps above. Upload the staged ButtonLifecycle diagnostic with BOOT released. Confirm DISARMED at boot. With the board flat and still, qualify a BOOT hold and release. Expect `ARMING_STARTED`, `ZEROING_STARTED` around +8 s and `ZEROING_OK` followed by diagnostic `ARMED` around +10 s. Capture sample count, magnitude and residual. Keep it flat through several tilt checks.
 2. Disarm and start another countdown. After `ZEROING_STARTED`, rock the board repeatedly throughout the window. Expect `ZEROING_RETRY` and another `ZEROING_STARTED`. Hold it still through the fresh 2 s window and expect `ZEROING_OK` and `ARMED`. In a separate trial, cancel during a retry window with a qualified BOOT hold and verify DISARMED. Reset with BOOT released and verify DISARMED.
@@ -248,4 +255,4 @@ Owner board checks for V03–V05. All are pending.
 4. Slowly raise the board past 30° and hold. Repeat with the opposite incline, sideways and combined roll/pitch, returning flat long enough to clear each time. Rotate the board about the vertical axis while flat and verify no tilt event. To isolate tilt from GPIO4, repeat the slow-tilt trial in a diagnostic build with `ENABLE_IMPACT_DETECTION = false`. Restore the feature switch after the test.
 5. With motion enabled, verify a known-detectable tap still prints `IMPACT_DETECTED` during tilt monitoring. Disarm and rearm at a different stable orientation, then hold that orientation and verify the new session starts normal. Restore `TestMode::None` after board testing.
 
-Merge gate remains open pending the native suite run and owner board evidence. Sustained linear acceleration can still look like inclination. The diagnostic remains awake, with periodic environmental reports and explicit sleep deferred.
+The remaining T05 merge gate item is execution of the native suite. The board traces leave exact physical step timing, other orientations and yaw, cancellation during a retry, and rearming at a different orientation unverified. Sustained linear acceleration can still look like inclination. The diagnostic remains awake, with periodic environmental reports and explicit sleep deferred.
