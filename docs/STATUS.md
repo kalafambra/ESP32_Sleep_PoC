@@ -420,6 +420,8 @@ Open for [T09](TASKS.md#t09--serial-diagnostics-and-fault-hardening) after T08A.
 
 Save the surrounding timestamped reports and sleep counters if the error recurs, along with any observed BOOT activity and whether sleep was enabled. Reproducing this particular failure by hand is unnecessary. Use any recurrence that affects cadence, causes a fault, or blocks a board check as evidence for the T09 investigation.
 
+The [V12 armed run](#v12-owner-armed-run--2026-11-26) captured a recurrence with no GPIO wakes or BOOT observations around the failed burst. The next burst succeeded on schedule. The cause remains open for T09.
+
 #### Remaining owner board verification
 
 The owner completed the checks feasible by hand. The checklist below records the original procedure and the evidence needed for any future timed test.
@@ -486,3 +488,10 @@ $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $PWD 'build-t08a-host/cache'
 - The board armed at `00:00:13.315`, then produced three four-sample reports at `00:00:23.563`, `00:00:33.563` and `00:00:43.563`. The capture showed six reported impacts, five suppressed notifications, tilt detection and clearing, and BOOT disarm at `00:00:51.210`. Final statistics showed 65 timer wakes, 11 GPIO wakes and zero entry errors.
 - A second normal-mode capture confirmed `Sleep off` and zero per-attempt trace lines. The board armed at `00:00:12.332` and produced three four-sample reports at `00:00:22.580`, `00:00:32.580` and `00:00:42.580`. Nine impacts were reported and nine were suppressed before BOOT disarm at `00:00:44.774`. Sleep-call time, wake counters and entry errors stayed at zero.
 - The remaining V15 comparison is `TestMode::SleepTrace` with `ENABLE_SLEEP = false`. Confirm the banner shows `Mode SleepTrace` and `Sleep off`, monitoring continues, and zero per-attempt sleep trace lines appear.
+
+### V12 owner armed run · 2026-11-26
+
+- The longer serial capture includes the entire earlier excerpt, so both files document one session. The T08A banner showed normal mode with impact, tilt, environmental acquisition and light sleep enabled, Arduino-ESP32 3.3.12, ESP-IDF 5.5.5 and MPU motion threshold raw 35 (`0x1F=0x23`). Zeroing accepted 200 samples. The board armed at `00:00:12.658` and disarmed at `00:30:07.492`, for 29 min 54.834 s armed. This provides the V12 stationary and approximately 30-minute observation on T08A firmware.
+- The BME280 delivered 178 four-sample reports across 179 scheduled slots. The first report was at `00:00:22.906` (10.248 s after arming) and the last at `00:30:02.906`. All consecutive report intervals were 10.000 s at log resolution except for one 20.000 s gap. The capture shows no unexpected resets, impact or tilt events, or per-attempt sleep traces.
+- At `00:26:02.720`, 62 ms after the scheduled burst start, the board logged `ENV_ERROR | invalid sample | consecutive failures 1/3`. That burst produced no report. The board stayed armed and resumed the original phase at `00:26:12.906`. The summaries immediately before and after the error showed zero GPIO wakes and zero BOOT and MPU observations. The recurrence leaves the [BME280 investigation](#intermittent-bme280-invalid-sample) open.
+- Each ordinary 10 s report interval added 14 timer wakes. The summary after disarm showed 2,523 timer wakes, one GPIO wake with BOOT observed, zero other wakes and MPU observations, zero sleep-entry errors, and 938 entry skips. The GPIO wake first appeared in that final summary. Cumulative sleep-call time was 1,786.324 s with 8.511 s estimated awake and 99.5% approximate utilization. Sleep-call time includes entry and exit overhead. Current was unmeasured.
